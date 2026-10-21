@@ -141,3 +141,28 @@ NPU接口沿用原v0.2，真实模型及180fps架构中的异步NPU工作线程�
 176.14/119.33Hz，输入180.135fps、零缺号，DMA全部归还，软件接收后源年龄P95 12.255ms。
 该场景无确认目标、未覆盖最大跟踪ROI，新档未完成30分钟复验，不替代此前稳定性结论。
 详见[调度提频报告](../reports/PERFORMANCE_FULL180_RATES_2026-09-08.md)。
+
+## 2026-10-21：确认像素测量接口与主机数值验证
+
+新增 `TargetEstimate.pixel_measurement`，从本次真实检测中唯一选中且经原跟踪器确认的
+green candidate 导出跟踪位置修正前的原始中心；原 `green.center_x/y` 保留 TemporalTracker
+后验语义。正常 camera 与 full180 VIN/cached 入口已接入实际源时间/序号标记和 JSON，
+预测、跳过、未确认或重复来源不会变为新像素测量。未知协方差保持无效，不提升未标定的
+`safe_for_control`、`angles_valid`、NPU 或 pose 状态。
+
+显式 `highfps.green_hz==camera.fps` 时按每个新来源帧调度，默认 90 Hz 路径仍保留原
+deadline。逆序包不再污染缺号高水位统计；新序号要求严格递增接收时钟。协方差接口严格
+检查有限值、精确对称及 PSD，拒绝小量级不定输入，不将仿真噪声值写入硬件默认配置。
+提交入口限单 producer 或全调用外部串行；交付只提供来源和年龄，消费者须独立检查新鲜度。
+完整契约与坐标/噪声单位见 [像素测量接口](PIXEL_MEASUREMENT_INTERFACE.md)。
+
+本次验证状态：
+
+- **PASS — 主机数值接口**：`tests/run_pixel_measurement_host.py --compiler-bin C:/mingw64/bin`
+  使用 GNU C++17 和现有 RGB 像素 stub，验证 raw/posterior 分离、确认/预测/一次交付、
+  JSON 往返、180/90 Hz 调度、序号恢复、相同接收时钟拒绝、PSD 反例及 near-zero 合法矩阵。
+  数值 NV21 helper 提取范围与哈希、运行记录位于忽略目录 `build/pixel-measurement-host/`。
+- **NOT_RUN — 标准 CMake/CTest 完整 suite**：本次主机 `cmake` 不可用；未安装工具链。
+  完整线程所有权/异步服务未运行，数值 fallback 不替代它们。
+- **NOT_RUN — 本次改动的 ARM/MaixCDK 构建、实际 VIN/180 Hz 采集、板端延迟和闭环**：
+  未访问设备，未据此更新此前硬件性能结论；本节只证明接口和主机数值合同。

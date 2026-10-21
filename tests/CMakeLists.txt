@@ -147,3 +147,18 @@ add_executable(model_confirmation_gate_tests test_model_confirmation_gate.cpp)
 target_compile_features(model_confirmation_gate_tests PRIVATE cxx_std_17)
 target_include_directories(model_confirmation_gate_tests PRIVATE ../main/include)
 add_test(NAME model_confirmation_gate_tests COMMAND model_confirmation_gate_tests)
+
+add_executable(pixel_measurement_tests
+    test_pixel_measurement.cpp
+    ../main/src/nv21_pipeline.cpp
+    "${HOST_SOURCE_DIR}/config.cpp"
+    "${HOST_SOURCE_DIR}/green_detector.cpp"
+    "${HOST_SOURCE_DIR}/green_detector_core.cpp"
+    "${HOST_SOURCE_DIR}/target_fusion.cpp"
+    "${HOST_SOURCE_DIR}/target_json.cpp"
+    "${HOST_SOURCE_DIR}/visual_motion.cpp"
+)
+target_compile_features(pixel_measurement_tests PRIVATE cxx_std_17)
+target_include_directories(pixel_measurement_tests PRIVATE stubs ../main/include)
+target_link_libraries(pixel_measurement_tests PRIVATE Threads::Threads)
+add_test(NAME pixel_measurement_tests COMMAND pixel_measurement_tests)

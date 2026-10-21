@@ -917,6 +917,40 @@ TargetEstimate GreenLightDetector::process(
     result.measurement_age_us = result.green.measurement_age_us;
     result.predicted = result.green.predicted;
 
+    // Keep detector measurement and temporal posterior as separate products.
+    // Debug coordinates were already rebased from ROI to source pixels.
+    if (result.classical_detection_ran && result.green.valid &&
+        !result.green.predicted) {
+        const GreenLightCandidateDebug *selected = nullptr;
+        unsigned count = 0;
+        for (const auto &candidate : last_candidates_) {
+            if (candidate.selected) { selected = &candidate; ++count; }
+        }
+        const int width = region_active_ ? source_width_ : frame.width();
+        const int height = region_active_ ? source_height_ : frame.height();
+        if (count == 1 && selected && std::isfinite(selected->center_x) &&
+            std::isfinite(selected->center_y) && selected->center_x >= 0 &&
+            selected->center_x < width && selected->center_y >= 0 &&
+            selected->center_y < height) {
+            auto &measurement = result.pixel_measurement;
+            measurement.valid = measurement.new_measurement =
+                measurement.tracker_confirmed = true;
+            measurement.selected_count = count;
+            measurement.center = {selected->center_x, selected->center_y, true};
+            measurement.bbox_x = selected->bbox_x;
+            measurement.bbox_y = selected->bbox_y;
+            measurement.bbox_w = selected->bbox_w;
+            measurement.bbox_h = selected->bbox_h;
+            measurement.source_width = width; measurement.source_height = height;
+            measurement.timestamp_us = timestamp_us;
+            measurement.candidate_score = selected->score;
+            measurement.density = selected->density;
+            measurement.appearance_score = selected->appearance_score;
+            // No candidate covariance is supplied by the detector. In
+            // particular, neither track covariance nor scores are substitutes.
+        }
+    }
+
     const auto clear_armor_candidate = [this]() {
         armor_candidate_detection_ = ArmorDetection{};
         armor_candidate_green_center_ = Point2f{};
@@ -1193,6 +1227,45 @@ TargetEstimate GreenLightDetector::process_target(
     const MotionPrior *motion_prior)
 {
     return process(frame, timestamp_us, motion_prior);
+}
+
+void stamp_pixel_measurement_source(TargetEstimate &target, uint64_t sequence,
+    uint64_t pts_raw, uint64_t received_us, const std::string &sequence_source,
+    const std::string &timestamp_source, bool pts_valid)
+{
+    auto &measurement = target.pixel_measurement;
+    if (!measurement.valid) return;
+    if (received_us != measurement.timestamp_us || sequence_source.empty() ||
+        timestamp_source.empty())
+        throw std::invalid_argument("Pixel measurement provenance must identify the same input frame");
+    measurement.source_sequence = sequence;
+    measurement.source_pts_raw = pts_raw;
+    measurement.source_metadata_valid = true;
+    measurement.source_pts_valid = pts_valid;
+    measurement.sequence_source = sequence_source;
+    measurement.timestamp_source = timestamp_source;
+    // SDK PTS payload validity does not establish an exposure event or its scale.
+    measurement.exposure_timestamp_valid = false;
+}
+
+void set_pixel_measurement_covariance(TargetEstimate &target,
+    const std::array<float,4> &covariance_px2, const std::string &model_source)
+{
+    if (!target.pixel_measurement.valid)
+        throw std::invalid_argument("Cannot attach covariance to an invalid image measurement");
+    for (float value : covariance_px2)
+        if (!std::isfinite(value)) throw std::invalid_argument("Pixel covariance must be finite");
+    // Products of finite floats are representable in double without the
+    // absolute tolerance that could otherwise accept small indefinite input.
+    // Reject rather than silently symmetrizing or projecting the caller's R.
+    const double diagonal_product = static_cast<double>(covariance_px2[0])*covariance_px2[3];
+    const double offdiagonal_square = static_cast<double>(covariance_px2[1])*covariance_px2[1];
+    if (model_source.empty() || covariance_px2[0] < 0 || covariance_px2[3] < 0 ||
+        covariance_px2[1] != covariance_px2[2] || offdiagonal_square > diagonal_product)
+        throw std::invalid_argument("Pixel covariance must be symmetric positive semidefinite with a declared model source");
+    target.pixel_measurement.position_covariance_px2 = covariance_px2;
+    target.pixel_measurement.position_covariance_valid = true;
+    target.pixel_measurement.covariance_source = model_source;
 }
 
 }  // namespace dart

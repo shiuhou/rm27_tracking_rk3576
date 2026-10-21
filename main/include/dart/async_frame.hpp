@@ -13,13 +13,19 @@ struct FrameMetadata {
 struct SequenceStats {
     uint64_t received = 0, missing = 0, duplicate = 0, reversed = 0, pts_reversed = 0;
     uint64_t last_sequence = 0, last_pts = 0;
+    // Arrival-order anomalies use last_sequence; gaps use the high-water mark
+    // so an old/rejected packet cannot create another gap on recovery.
+    uint64_t highest_sequence = 0;
     void observe(const FrameMetadata &m) {
         if (received) {
             if (m.sequence == last_sequence) ++duplicate;
             else if (m.sequence < last_sequence) ++reversed; // no assumed wrap width
-            else missing += m.sequence - last_sequence - 1;
+            if (m.sequence > highest_sequence) {
+                missing += m.sequence - highest_sequence - 1;
+                highest_sequence = m.sequence;
+            }
             if (m.pts_raw <= last_pts) ++pts_reversed;
-        }
+        } else highest_sequence = m.sequence;
         ++received; last_sequence = m.sequence; last_pts = m.pts_raw;
     }
 };
@@ -88,5 +94,28 @@ public:
 private:
     uint64_t origin_=0, last_=0, tick_=0;
     unsigned hz_; bool started_=false;
+};
+
+// At one measurement per camera frame, a second same-rate deadline would
+// unnecessarily skip jittered 5.5/6 ms inputs. Source identity, not a refreshed
+// receive timestamp, defines a new frame. Lower rates keep the old deadlines.
+class FrameMeasurementSchedule {
+public:
+    FrameMeasurementSchedule(unsigned measurement_hz,unsigned camera_hz)
+        : deadlines_(measurement_hz),per_frame_(measurement_hz==camera_hz) {
+        if(!camera_hz || measurement_hz>camera_hz)
+            throw std::invalid_argument("measurement rate must not exceed camera rate");
+    }
+    bool due(const FrameMetadata &frame) {
+        if(seen_ && frame.sequence<=last_sequence_)return false;
+        if(seen_ && frame.received_us<=last_received_us_)
+            throw std::invalid_argument("new frame receive timestamp must strictly increase");
+        seen_=true;last_sequence_=frame.sequence;last_received_us_=frame.received_us;
+        return per_frame_ || deadlines_.due(frame.received_us);
+    }
+private:
+    TimestampSchedule deadlines_;
+    bool per_frame_=false,seen_=false;
+    uint64_t last_sequence_=0,last_received_us_=0;
 };
 } // namespace dart

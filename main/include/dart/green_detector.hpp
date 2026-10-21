@@ -117,6 +117,29 @@ struct GreenLightDetection {
     int missed_frames = 0;
 };
 
+// A confirmed current-image point before TemporalTracker's position update.
+// Pixel validity is not a calibrated bearing or permission to control hardware.
+struct PixelMeasurement {
+    bool valid = false;
+    bool new_measurement = false;
+    bool tracker_confirmed = false;
+    unsigned selected_count = 0;
+    Point2f center;
+    int bbox_x = 0, bbox_y = 0, bbox_w = 0, bbox_h = 0;
+    int source_width = 0, source_height = 0;
+    uint64_t timestamp_us = 0, measurement_age_us = 0;
+    uint64_t source_sequence = 0, source_pts_raw = 0;
+    bool source_metadata_valid = false;
+    bool source_pts_valid = false;
+    bool exposure_timestamp_valid = false;
+    std::string sequence_source = "unavailable";
+    std::string timestamp_source = "detector_input_timestamp_us";
+    float candidate_score = 0.0F, density = 0.0F, appearance_score = 0.0F;
+    bool position_covariance_valid = false;
+    std::array<float, 4> position_covariance_px2{}; // Row-major 2x2, pixel^2.
+    std::string covariance_source = "unavailable from candidate detector";
+};
+
 struct TargetEstimate {
     int schema_version = 2;
     bool angles_valid = true; // legacy path; high-fps uncalibrated path clears this
@@ -139,6 +162,7 @@ struct TargetEstimate {
     float model_inference_ms = 0.0F;
 
     GreenLightDetection green;
+    PixelMeasurement pixel_measurement;
     ArmorDetection armor;
     TargetPose pose;
 
@@ -150,6 +174,16 @@ struct TargetEstimate {
     float pitch_rad = 0.0F;
     float confidence = 0.0F;
 };
+
+// Attach provenance from the same input frame, without relabeling reception as
+// exposure. Invalid measurements remain invalid and receive no fresh identity.
+void stamp_pixel_measurement_source(TargetEstimate &target, uint64_t sequence,
+    uint64_t pts_raw, uint64_t received_us, const std::string &sequence_source,
+    const std::string &timestamp_source, bool pts_valid);
+// Optional external calibration, in the same source pixel coordinates. This
+// validates the matrix, not the empirical quality of the supplied noise model.
+void set_pixel_measurement_covariance(TargetEstimate &target,
+    const std::array<float,4> &covariance_px2, const std::string &model_source);
 
 struct GreenLightCandidateDebug {
     float center_x = 0.0F;

@@ -149,6 +149,7 @@ TargetEstimate predict_full180_output(const TargetEstimate &source,
     detail::TemporalTracker tracker,const ApplicationConfig &config,uint64_t now) {
     if(now<source.source_received_us) throw std::invalid_argument("output precedes source");
     auto t=source;
+    t.pixel_measurement=PixelMeasurement{};
     t.green=tracker.update(nullptr,now,config.detector.camera_model,false);
     t.timestamp_us=now;t.measurement_age_us=t.green.measurement_age_us;
     t.valid=t.green.valid;t.predicted=t.green.predicted;
@@ -172,6 +173,25 @@ TargetEstimate predict_full180_output(const TargetEstimate &source,
         t.state=t.measurement_age_us>=500000 ? GuidanceTrackState::Search : GuidanceTrackState::Reacquire;
     invalidate_uncalibrated(t);return t;
 }
+bool PixelMeasurementDelivery::transfer(TargetEstimate &output,
+    const TargetEstimate &source, uint64_t now, bool new_snapshot) {
+    output.pixel_measurement=PixelMeasurement{};
+    const auto &measurement=source.pixel_measurement;
+    if(!new_snapshot || !source.source_metadata_valid || !source.classical_detection_ran || !source.green.valid ||
+       source.green.predicted || !measurement.valid || !measurement.new_measurement ||
+       !measurement.tracker_confirmed || measurement.selected_count!=1 ||
+       !measurement.center.valid || !std::isfinite(measurement.center.x) ||
+       !std::isfinite(measurement.center.y) || !measurement.source_metadata_valid || measurement.timestamp_us>now ||
+       measurement.source_sequence!=source.source_sequence ||
+       measurement.timestamp_us!=source.source_received_us)
+        return false;
+    if(delivered_ && (measurement.source_sequence<=last_sequence_ ||
+                     measurement.timestamp_us<=last_timestamp_))return false;
+    output.pixel_measurement=measurement;
+    output.pixel_measurement.measurement_age_us=now-measurement.timestamp_us;
+    last_sequence_=measurement.source_sequence;last_timestamp_=measurement.timestamp_us;
+    delivered_=true;return true;
+}
 HighFpsPipeline::HighFpsPipeline(const ApplicationConfig &c,bool idle,bool stress,PipelineInputSource source):config_(c),idle_(idle),stress_(stress),input_source_(source) {
     if(c.camera.width!=1344 || c.camera.height!=760 || c.camera.fps!=180 ||
        c.npu.enabled || c.target_geometry.pose_enabled || c.detector.classical_interval_frames!=1)
@@ -185,9 +205,17 @@ HighFpsPipeline::HighFpsPipeline(const ApplicationConfig &c,bool idle,bool stres
 }
 HighFpsPipeline::~HighFpsPipeline(){finish();}
 void HighFpsPipeline::submit(std::shared_ptr<Nv21Frame> f) {
+    bool accepted=true;
     { std::lock_guard<std::mutex> lock(stats_mutex_);
       if(!sequence_.received) first_received_=f->metadata.received_us;
-      last_received_=f->metadata.received_us; sequence_.observe(f->metadata); }
+      last_received_=f->metadata.received_us; sequence_.observe(f->metadata);
+      if(have_accepted_source_sequence_ && f->metadata.sequence<=last_accepted_source_sequence_){
+          ++rejected_source_frames_;accepted=false;
+      } else {
+          have_accepted_source_sequence_=true;last_accepted_source_sequence_=f->metadata.sequence;
+      }
+    }
+    if(!accepted)return;
     frames_.publish(std::move(f));
 }
 void HighFpsPipeline::finish() {
@@ -206,6 +234,7 @@ void HighFpsPipeline::finish() {
         <<"\",\"received\":"<<sequence_.received<<",\"slot_replaced\":"<<fs.replaced
         <<",\"scheduled_skipped\":"<<scheduled_skipped_<<",\"shutdown_discarded\":"<<fs.shutdown_discarded
         <<",\"slot_taken\":"<<fs.taken<<",\"upstream_missing\":"<<sequence_.missing
+        <<",\"rejected_source_frames\":"<<rejected_source_frames_
         <<",\"upstream_duplicate\":"<<sequence_.duplicate<<",\"upstream_reversed\":"<<sequence_.reversed
         <<",\"pts_nonincreasing\":"<<sequence_.pts_reversed<<",\"vision_frames\":"<<vision_count_
         <<",\"green_detection_calls\":"<<green_count_<<",\"armor_detection_calls\":"<<armor_count_
@@ -221,7 +250,8 @@ void HighFpsPipeline::finish() {
 void HighFpsPipeline::vision_loop() {
     try {
         GreenLightDetector detector(config_.detector,config_.armor,config_.target_geometry,config_.npu);
-        TimestampSchedule measurement(config_.highfps.green_hz), search(config_.highfps.search_hz),
+        FrameMeasurementSchedule measurement(config_.highfps.green_hz,config_.camera.fps);
+        TimestampSchedule search(config_.highfps.search_hz),
             motion_schedule(config_.highfps.motion_hz), armor_schedule(config_.highfps.armor_hz);
         std::vector<Point2f> proposals;
         TargetEstimate last;
@@ -232,7 +262,7 @@ void HighFpsPipeline::vision_loop() {
         while(auto f=frames_.wait()) {
             if(stopped_) break;
             const auto started=monotonic_us();
-            if(idle_ || !measurement.due(f->metadata.received_us)) { ++scheduled_skipped_; continue; }
+            if(idle_ || !measurement.due(f->metadata)) { ++scheduled_skipped_; continue; }
             const auto v=f->map();
             if(v.width!=1344 || v.height!=760) throw std::runtime_error("unexpected business source dimensions");
             auto prediction=detector.tracker_snapshot(); prediction.predict(f->metadata.received_us);
@@ -277,6 +307,10 @@ void HighFpsPipeline::vision_loop() {
             snapshot->tracker=detector.tracker_snapshot();
             last.source_metadata_valid=true; last.source_sequence=f->metadata.sequence;
             last.source_pts_raw=f->metadata.pts_raw; last.source_received_us=f->metadata.received_us;
+            stamp_pixel_measurement_source(last,f->metadata.sequence,
+                f->metadata.pts_raw,f->metadata.received_us,
+                input_source_==PipelineInputSource::Vin ? "VIN_SDK_sequence" : "cached_video_sequence",
+                input_source_==PipelineInputSource::Vin ? "VIN_receive_host_monotonic" : "cached_video_submit_host_monotonic",true);
             invalidate_uncalibrated(last); snapshot->target=last; estimates_.publish(snapshot);
             const bool armor_ran=last.armor_detection_ran;
             ++vision_count_; if(last.classical_detection_ran) ++green_count_; if(armor_ran) ++armor_count_;
@@ -313,9 +347,11 @@ void HighFpsPipeline::control_loop() {
     try {
         AsyncLog log("targets.jsonl",8*1024*1024);
         std::shared_ptr<Snapshot> latest;
+        PixelMeasurementDelivery measurement_delivery;
         const auto origin=std::chrono::steady_clock::now(); uint64_t tick=0;
         while(!stopped_) {
-            if(auto next=estimates_.take()) latest=std::move(next);
+            bool new_snapshot=false;
+            if(auto next=estimates_.take()) { latest=std::move(next);new_snapshot=true; }
             // Read after acquiring the snapshot: preemption must not make the
             // output timestamp earlier than a newly published source frame.
             const auto now=monotonic_us();
@@ -324,6 +360,7 @@ void HighFpsPipeline::control_loop() {
                 t=predict_full180_output(latest->target,latest->tracker,config_,now);
             } else t.timestamp_us=now;
             invalidate_uncalibrated(t);
+            if(latest)measurement_delivery.transfer(t,latest->target,now,new_snapshot);
             {std::lock_guard<std::mutex> lock(stats_mutex_);
              t.upstream_missing=sequence_.missing;t.upstream_duplicate=sequence_.duplicate;t.upstream_reversed=sequence_.reversed;}
             t.application_dropped=frames_.stats().replaced+scheduled_skipped_.load();

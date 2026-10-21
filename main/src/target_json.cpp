@@ -7,6 +7,49 @@
 namespace dart {
 namespace {
 
+void write_json_string(std::ostream &output, const std::string &value)
+{
+    constexpr char hex[]="0123456789abcdef";
+    output << '"';
+    for (unsigned char c : value) {
+        if (c=='"' || c=='\\') output << '\\' << static_cast<char>(c);
+        else if (c<0x20) output << "\\u00" << hex[c>>4] << hex[c&15];
+        else output << static_cast<char>(c);
+    }
+    output << '"';
+}
+
+void write_pixel_measurement(std::ostream &output, const PixelMeasurement &m)
+{
+    output << "{\"schema_version\":1,\"valid\":" << (m.valid ? "true":"false")
+        << ",\"new_measurement\":" << (m.new_measurement ? "true":"false")
+        << ",\"tracker_confirmed\":" << (m.tracker_confirmed ? "true":"false")
+        << ",\"selected_count\":" << m.selected_count
+        << ",\"kind\":\"confirmed_pre_TemporalTracker_candidate\""
+        << ",\"coordinate_frame\":\"source_image_pixel_centers\""
+        << ",\"center\":{\"valid\":" << (m.center.valid ? "true":"false")
+        << ",\"x\":" << m.center.x << ",\"y\":" << m.center.y << '}'
+        << ",\"bbox_xywh\":[" << m.bbox_x << ',' << m.bbox_y << ',' << m.bbox_w << ',' << m.bbox_h << ']'
+        << ",\"source_width\":" << m.source_width << ",\"source_height\":" << m.source_height
+        << ",\"timestamp_us\":" << m.timestamp_us << ",\"measurement_age_us\":" << m.measurement_age_us
+        << ",\"source_sequence\":" << m.source_sequence << ",\"source_pts_raw\":" << m.source_pts_raw
+        << ",\"source_metadata_valid\":" << (m.source_metadata_valid ? "true":"false")
+        << ",\"source_pts_valid\":" << (m.source_pts_valid ? "true":"false")
+        << ",\"exposure_timestamp_valid\":" << (m.exposure_timestamp_valid ? "true":"false")
+        << ",\"sequence_source\":";
+    write_json_string(output,m.sequence_source);
+    output << ",\"timestamp_source\":";write_json_string(output,m.timestamp_source);
+    output << ",\"quality\":{\"candidate_score\":" << m.candidate_score
+        << ",\"density\":" << m.density << ",\"appearance_score\":" << m.appearance_score << '}'
+        << ",\"position_covariance_valid\":" << (m.position_covariance_valid ? "true":"false")
+        << ",\"position_covariance_px2\":";
+    if (m.position_covariance_valid)
+        output << "[[" << m.position_covariance_px2[0] << ',' << m.position_covariance_px2[1]
+               << "],[" << m.position_covariance_px2[2] << ',' << m.position_covariance_px2[3] << "]]";
+    else output << "null";
+    output << ",\"covariance_source\":";write_json_string(output,m.covariance_source);output << '}';
+}
+
 void write_point(std::ostream &output, const Point2f &point)
 {
     output << "{\"valid\":" << (point.valid ? "true" : "false")
@@ -184,6 +227,8 @@ void write_target_estimate_json(
            << "],\"angular_covariance\":["
            << target.angular_covariance[0] << ','
            << target.angular_covariance[1] << ']';
+    output << ",\"pixel_measurement\":";
+    write_pixel_measurement(output,target.pixel_measurement);
     if (candidates != nullptr) {
         output << ",\"candidate_count\":" << candidates->size()
                << ",\"candidates\":";

@@ -23,6 +23,12 @@ int main() {
     dart::SequenceStats seq;
     for(auto n:{10,11,14,14,13}) seq.observe({static_cast<uint64_t>(n),static_cast<uint64_t>(n),0});
     CHECK(seq.missing==2 && seq.duplicate==1 && seq.reversed==1 && seq.pts_reversed==2);
+    dart::SequenceStats recovered;
+    for(auto n:{10,9,11}) recovered.observe({static_cast<uint64_t>(n),static_cast<uint64_t>(n),0});
+    CHECK(recovered.missing==0 && recovered.reversed==1 && recovered.highest_sequence==11);
+    dart::SequenceStats gap_recovery;
+    for(auto n:{10,12,11,13}) gap_recovery.observe({static_cast<uint64_t>(n),static_cast<uint64_t>(n),0});
+    CHECK(gap_recovery.missing==1 && gap_recovery.reversed==1 && gap_recovery.highest_sequence==13);
     dart::TimestampSchedule rate(180); int count=0;
     for(uint64_t t=0;t<1000000;++t) if(rate.due(t)) ++count;
     CHECK(count==180); CHECK(rate.due(2000000)); CHECK(!rate.due(2000000));

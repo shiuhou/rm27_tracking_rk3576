@@ -186,8 +186,10 @@ int run(int argc, char **argv)
             motion_prior = visual_motion.update(*frame, timestamp_us);
         }
         const uint64_t visual_motion_finished_us = maix::time::ticks_us();
-        const dart::TargetEstimate target = detector.process(
+        dart::TargetEstimate target = detector.process(
             *frame, timestamp_us, motion_prior.valid ? &motion_prior : nullptr);
+        dart::stamp_pixel_measurement_source(target, frame_index, 0, timestamp_us,
+            "application_frame_index", "host_after_camera_read", false);
         const uint64_t processing_finished_us = maix::time::ticks_us();
         const auto &detection = target.green;
         if (frame_index % 60U == 0U) {
