@@ -1375,6 +1375,21 @@ const std::vector<GreenLightCandidateDebug> &GreenLightDetector::last_candidates
     return last_candidates_;
 }
 
+std::vector<GreenLightCandidateDebug>
+GreenLightDetector::detect_candidates(maix::image::Image &frame) const
+{
+    GreenLightDetector collector(config_, armor_config_, target_geometry_);
+    auto candidates = collector.collect_candidates(frame);
+    std::vector<GreenLightCandidateDebug> result;
+    result.reserve(candidates.size());
+    for (const auto &candidate : candidates) {
+        auto current = candidate.debug;
+        current.selected = false;
+        result.push_back(current);
+    }
+    return result;
+}
+
 std::vector<GreenLightDetector::Candidate>
 GreenLightDetector::collect_candidates(maix::image::Image &frame)
 {

@@ -160,3 +160,26 @@ MaixCDK build. This change requires a source rebuild because the C++
 `TargetEstimate` value type has an added member; it does not claim binary ABI
 compatibility with already-built clients. JSON is additive, with the existing
 schema-v2 field meanings retained and the nested measurement schema marked 1.
+
+## Stateless RGB candidate collection
+
+`GreenLightDetector::detect_candidates(Image&) const` is a separate low-level
+candidate API. It creates a fresh local collector for the current RGB image and
+returns `GreenLightCandidateDebug` values before temporal tracking or selection.
+It does not call the temporal tracker, candidate-hypothesis update, NPU, armor,
+output prediction or confirmation path; it leaves the calling detector's tracker,
+source/output cache and `last_candidates()` unchanged. Repeated calls on the same
+pixels and configuration are independent of earlier tracking history.
+
+These are **unconfirmed candidates**, with `selected=false`. They are not
+`PixelMeasurement` or `TargetEstimate` products and carry no timestamp, source
+identity, calibrated bearing, uncertainty or control-safety claim. Consumers
+own association, source stamping, deduplication, freshness and confirmation.
+Candidate scores are not position covariances. Existing stateful detection and
+fail-closed output defaults remain unchanged. The method accepts a complete RGB
+image; a cropped image requires the caller to transform coordinates and camera
+calibration explicitly.
+
+The numerical host regression verifies current-image/history independence,
+unchanged temporal state and cache, and absence of selected candidates. It does
+not qualify a downstream estimator or demonstrate board throughput.

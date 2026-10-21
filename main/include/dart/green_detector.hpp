@@ -571,6 +571,13 @@ public:
     void reset();
     const std::vector<GreenLightCandidateDebug> &last_candidates() const;
 
+    // Current RGB-frame candidates only. Uses a fresh local collector, without
+    // advancing or consulting this instance's tracker, candidate hypotheses,
+    // output cache, confirmation history, NPU or armor path. No candidate is
+    // selected or control-qualified; the caller owns association and timestamps.
+    std::vector<GreenLightCandidateDebug>
+    detect_candidates(maix::image::Image &frame) const;
+
 private:
     bool region_active_ = false, region_force_armor_ = false, region_run_armor_ = true;
     CandidateRoi region_{};

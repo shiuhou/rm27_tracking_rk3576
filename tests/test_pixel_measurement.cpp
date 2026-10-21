@@ -64,6 +64,27 @@ int main(){
     config.enable_normalized_multiscale=true;
     config.enable_sparse_component_search=true;
     config.enable_capture_cone=false;
+    {
+        dart::GreenLightDetector cold(config),warm(config);
+        auto fixed=image(0);
+        const auto current=cold.detect_candidates(fixed);
+        check(!current.empty(),"stateless API detects real current-frame RGB candidates");
+        check(!cold.tracker_snapshot().has_prediction()&&cold.last_candidates().empty(),
+              "candidate-only call does not initialize tracker or overwrite stateful output cache");
+        for(int index=0;index<8;++index){auto moving=image(index);warm.process(moving,1000000+index*6000);}
+        const auto before=warm.tracker_snapshot();
+        const auto independent=warm.detect_candidates(fixed);
+        const auto after=warm.tracker_snapshot();
+        check(before.has_prediction()&&before.predicted_x()==after.predicted_x()&&before.predicted_y()==after.predicted_y(),
+              "candidate-only call cannot advance an existing temporal position state");
+        check(independent.size()==current.size(),"candidate count independent of previous image/track history");
+        for(std::size_t index=0;index<current.size()&&index<independent.size();++index){
+            const auto&a=current[index];const auto&b=independent[index];
+            check(a.center_x==b.center_x&&a.center_y==b.center_y&&a.score==b.score,
+                  "current candidate centers and scores independent of earlier tracking history");
+            check(!a.selected&&!b.selected,"stateless candidates are neither selected nor control-qualified");
+        }
+    }
     dart::GreenLightDetector detector(config);
     dart::TargetEstimate source;
     bool confirmed=false,unconfirmed=false,separated=false;

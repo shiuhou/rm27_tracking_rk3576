@@ -166,3 +166,16 @@ deadline。逆序包不再污染缺号高水位统计；新序号要求严格递
   完整线程所有权/异步服务未运行，数值 fallback 不替代它们。
 - **NOT_RUN — 本次改动的 ARM/MaixCDK 构建、实际 VIN/180 Hz 采集、板端延迟和闭环**：
   未访问设备，未据此更新此前硬件性能结论；本节只证明接口和主机数值合同。
+
+### 无状态 RGB 候选接口
+
+新增独立 `GreenLightDetector::detect_candidates(Image&) const`，返回当前 RGB 帧的
+未选择候选，供外部已拥有姿态补偿/关联状态的消费者按模块接入。该方法使用新的局部
+collector，不执行 TemporalTracker、候选轨迹库、NPU、装甲、确认或输出预测，也不修改
+已有 detector 的跟踪状态和 `last_candidates()`。没有赋予候选任何控制安全、协方差或
+源时钟语义；契约追加在现有像素接口文档中，原硬件配置和安全默认值保持。
+
+- **PASS — 主机数值回归**：现有 `tests/run_pixel_measurement_host.py` 实际运行通过，
+  新增同图候选不依赖旧轨迹、调用不推进跟踪状态/缓存和 selected 始终为 false 的检查。
+- **NOT_RUN — 完整 CMake/CTest、ARM/MaixCDK、VIN/ISP/NPU 与板端延迟**：本机没有
+  可用 CMake，未访问设备。本接口的候选生产不等于下游闭环或板端实时性验收。
