@@ -1,0 +1,8 @@
+{
+  "device": "/dev/video0",
+  "backend": "v4l2",
+  "width": null,
+  "height": null,
+  "fps": null,
+  "fourcc": null
+}

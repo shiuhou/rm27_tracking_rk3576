@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rm27-tracking"
+version = "0.2.0"
+description = "Generic embedded vision acquisition and offline replay research"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24,<3"]
+
+# BSP/distro cv2 is supported without installing a second cv2 distribution.
+[project.optional-dependencies]
+opencv = ["opencv-python-headless>=4.8,<6"]
+
+[project.scripts]
+rm27-replay = "rm27_tracking.replay:main"
+rm27-vision = "rm27_tracking.capture:main"
+rm27-benchmark = "rm27_tracking.benchmark:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
