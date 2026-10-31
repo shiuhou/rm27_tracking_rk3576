@@ -43,7 +43,7 @@ class RuntimeConfig:
 
 
 class Latencies:
-    """Constant-memory log histogram: P95 upper bucket edge (error <=3% of latency + 1 microsecond).
+    """Constant-memory log histogram: percentile upper edges (<=3% + 1 microsecond).
 
     Exact mean/max; 768 buckets of logarithm base 1.03 in microseconds.
     All samples contribute, including long sustained runs; no biased ring sample.
@@ -62,11 +62,15 @@ class Latencies:
 
     def summary(self):
         if not self.count:
-            return {"count": 0, "mean_ms": None, "p95_ms": None, "max_ms": None}
-        bucket = int(np.searchsorted(np.cumsum(self.histogram), int(np.ceil(self.count * .95))))
-        return {"count": self.count, "mean_ms": self.total / self.count / 1e6,
-                "p95_ms": min(self.maximum / 1e6, (1.03 ** bucket - 1) / 1000),
-                "max_ms": self.maximum / 1e6}
+            return {"count": 0, "mean_ms": None, "p50_ms": None, "p95_ms": None,
+                    "p99_ms": None, "max_ms": None}
+        result = {"count": self.count, "mean_ms": self.total / self.count / 1e6,
+                  "max_ms": self.maximum / 1e6}
+        cumulative = np.cumsum(self.histogram)
+        for name, fraction in (("p50_ms", .5), ("p95_ms", .95), ("p99_ms", .99)):
+            bucket = int(np.searchsorted(cumulative, int(np.ceil(self.count * fraction))))
+            result[name] = min(self.maximum / 1e6, (1.03 ** bucket - 1) / 1000)
+        return result
 
 
 @dataclass
@@ -126,8 +130,8 @@ class BufferedSource:
                     self.acquisition.add(elapsed)
                     self.captured += 1
                     if self.first_received is None:
-                        self.first_received = frame.received_monotonic_ns
-                    self.last_received = frame.received_monotonic_ns
+                        self.first_received = frame.host_received_monotonic_ns
+                    self.last_received = frame.host_received_monotonic_ns
                     if self.closed:
                         self.discarded_on_stop += 1
                         break
@@ -232,7 +236,7 @@ def run_pipeline(source, output, processing: ProcessingConfig, runtime: RuntimeC
     output = Path(output)
     # The caller creates a fresh run directory (and optional input manifest).
     output.mkdir(parents=True, exist_ok=True)
-    for name in ("summary.json", "frames.jsonl", "resources.jsonl", "preview.png"):
+    for name in ("summary.json", "frames.jsonl", "publications.jsonl", "resources.jsonl", "preview.png"):
         if (output / name).exists():
             raise FileExistsError(f"refusing to overwrite run artifact: {output / name}")
     # Atomic reservation also prevents concurrent runs from owning one summary.
@@ -241,13 +245,19 @@ def run_pipeline(source, output, processing: ProcessingConfig, runtime: RuntimeC
     cv2.setNumThreads(runtime.opencv_threads)
     buffered = BufferedSource(source, runtime.queue_capacity, runtime.queue_policy,
                               max_capture_frames=processing.max_frames if runtime.queue_policy == "block" else None)
-    stages = {name: Latencies() for name in ('queue_wait', 'validation', 'preprocessing', 'processing', 'preprocess_and_process', 'logging', 'host_residence')}
-    summary = {"schema_version": 2, "passed": False, "hardware_verified": False,
+    stages = {name: Latencies() for name in ('queue_wait', 'validation', 'preprocessing', 'processing', 'preprocess_and_process', 'logging', 'host_residence', 'host_to_processing_complete')}
+    summary = {"schema_version": 3, "passed": False, "hardware_verified": False,
                "mode": "host_offline_replay", "config": asdict(processing),
                "runtime": asdict(runtime), "versions": {"rm27_tracking": __version__,
                "python": platform.python_version(), "opencv": cv2.__version__, "numpy": np.__version__},
                "platform": {"machine": platform.machine(), "system": platform.system(), "release": platform.release()},
                "p95_method": "all-sample log histogram, upper bucket edge, 1.03 ratio",
+               "percentile_method": "all-sample log histogram, upper bucket edge, 1.03 ratio",
+               "timestamp_boundaries_clock": "current_host_monotonic_ns",
+               "publication_semantic": "selected frame JSONL flush and first preview write returned; not disk durability",
+               "camera_to_output_latency": None,
+               "camera_to_output_unavailable_reason": "no verified source/exposure to current host clock relationship",
+               "host_residence_semantic": "current host receipt to selected output completion; publication samples only",
                "frame_count": 0}
     summary.update(metadata or {})
     count = 0
@@ -260,9 +270,12 @@ def run_pipeline(source, output, processing: ProcessingConfig, runtime: RuntimeC
     last_sample = started
     consumer_validation = TimestampValidator()
     failure = None
+    pixel_digest = hashlib.sha256()
+    publication_count = 0
     try:
         packets = iter(buffered)
-        with (output / 'frames.jsonl').open('x') as log, (output / 'resources.jsonl').open('x') as resources:
+        with (output / 'frames.jsonl').open('x') as log, (output / 'resources.jsonl').open('x') as resources, \
+                (output / 'publications.jsonl').open('x') as publications:
             while processing.max_frames is None or count < processing.max_frames:
                 if runtime.duration_s is not None and (perf_counter_ns() - started) / 1e9 >= runtime.duration_s:
                     summary['stop_reason'] = 'duration'
@@ -273,44 +286,76 @@ def run_pipeline(source, output, processing: ProcessingConfig, runtime: RuntimeC
                     summary["stop_reason"] = "duration"
                     break
                 except StopIteration:
-                    summary['stop_reason'] = 'decoder_end'
+                    summary['stop_reason'] = getattr(source, 'stats', {}).get('stop_reason', 'decoder_end')
                     break
                 frame = packet.frame
-                arrived = perf_counter_ns()
-                stages['queue_wait'].add(monotonic_ns() - packet.queued_ns)
+                arrived = monotonic_ns()
+                stages['queue_wait'].add(arrived - packet.queued_ns)
                 consumer_validation.observe(frame)
-                validated = perf_counter_ns()
+                validated = monotonic_ns()
                 image = preprocess(frame.image, processing)
-                preprocessed = perf_counter_ns()
+                preprocessed = monotonic_ns()
                 result = processor(image)
-                processed = perf_counter_ns()
+                processed = monotonic_ns()
                 stages['validation'].add(validated - arrived)
                 stages['preprocessing'].add(preprocessed - validated)
                 stages['processing'].add(processed - preprocessed)
                 stages['preprocess_and_process'].add(processed - validated)
-                if runtime.log_every and count % runtime.log_every == 0:
+                stages['host_to_processing_complete'].add(processed - frame.host_received_monotonic_ns)
+                logged = runtime.log_every and count % runtime.log_every == 0
+                frame_hash = None
+                if runtime.hash_frames:
+                    # Aggregate covers EVERY processed output, independent of log sampling.
+                    frame_hash = hashlib.sha256(image).hexdigest()
+                    pixels = hashlib.sha256(json.dumps(list(image.shape)).encode('ascii') + image.dtype.str.encode('ascii'))
+                    pixels.update(image)
+                    pixel_digest.update(pixels.digest())
+                output_start = monotonic_ns()
+                if logged:
                     row = {"sequence": frame.sequence, "source_sequence": frame.source_sequence,
                            "stream_id": frame.stream_id, "timestamp_ns": frame.timestamp_ns,
                            "clock_domain": frame.clock_domain, "timestamp_semantic": frame.timestamp_semantic,
                            "received_monotonic_ns": frame.received_monotonic_ns,
+                           "original_received_monotonic_ns": frame.original_received_monotonic_ns,
+                           "replay_received_monotonic_ns": frame.replay_received_monotonic_ns,
+                           "acquisition_metadata": frame.acquisition_metadata,
+                           "boundaries": {"validation_start_monotonic_ns": arrived,
+                                          "preprocessing_start_monotonic_ns": validated,
+                                          "preprocessing_end_monotonic_ns": preprocessed,
+                                          "processing_start_monotonic_ns": preprocessed,
+                                          "processing_end_monotonic_ns": processed,
+                                          "output_start_monotonic_ns": output_start},
                            "input_shape": list(frame.image.shape), "output_shape": list(image.shape),
                            "acquisition_ns": packet.acquisition_ns, "queue_depth_after_dequeue": packet.queue_depth,
                            "processing_ns": processed - validated, "result": result}
-                    if runtime.hash_frames:
-                        row['processed_sha256'] = hashlib.sha256(image).hexdigest()
+                    if frame_hash is not None:
+                        row['processed_sha256'] = frame_hash
                     log.write(json.dumps(row, allow_nan=False) + '\n')
+                    log.flush()
                 if count == 0 and not cv2.imwrite(str(output / 'preview.png'), image):
                     raise RuntimeError('failed to write preview')
-                finished = perf_counter_ns()
+                published = monotonic_ns()
+                if logged or count == 0:
+                    # The event follows completion of the result operation it describes.
+                    publications.write(json.dumps({"sequence": frame.sequence, "stream_id": frame.stream_id,
+                                                   "output_start_monotonic_ns": output_start,
+                                                   "published_monotonic_ns": published,
+                                                   "operations": (["frame_jsonl_flush"] if logged else []) +
+                                                                 (["preview_write"] if count == 0 else []),
+                                                   "disk_durability": False}) + '\n')
+                    publications.flush()
+                    publication_count += 1
+                    stages['host_residence'].add(published - frame.host_received_monotonic_ns)
+                finished = monotonic_ns()
                 stages['logging'].add(finished - processed)
-                stages['host_residence'].add(monotonic_ns() - frame.received_monotonic_ns)
                 if count == 0:
                     summary.update(clock_domain=frame.clock_domain, timestamp_semantic=frame.timestamp_semantic)
                 count += 1
-                if sample_count == 0 or finished - last_sample >= 1_000_000_000:
+                sample_now = perf_counter_ns()
+                if sample_count == 0 or sample_now - last_sample >= 1_000_000_000:
                     rss = rss_bytes()
                     cpu = process_time_ns() - before_cpu
-                    resources.write(json.dumps({'elapsed_s': (finished-started)/1e9,
+                    resources.write(json.dumps({'elapsed_s': (sample_now-started)/1e9,
                                                 'rss_bytes': rss, 'cpu_time_ns': cpu}) + '\n')
                     if rss is not None:
                         rss_first = rss if rss_first is None else rss_first
@@ -318,10 +363,10 @@ def run_pipeline(source, output, processing: ProcessingConfig, runtime: RuntimeC
                         rss_min = rss if rss_min is None else min(rss_min, rss)
                         rss_max = rss if rss_max is None else max(rss_max, rss)
                     sample_count += 1
-                    last_sample = finished
+                    last_sample = sample_now
             else:
                 summary['stop_reason'] = 'max_frames'
-        if not count:
+        if not count and summary.get('stop_reason') != 'recording_byte_limit':
             raise ValueError('no frames processed')
     except BaseException as exc:
         failure = exc
@@ -340,6 +385,9 @@ def run_pipeline(source, output, processing: ProcessingConfig, runtime: RuntimeC
         pre = stage_summary['preprocessing']['mean_ms']
         proc = stage_summary['processing']['mean_ms']
         summary.update(frame_count=count, elapsed_ns=elapsed,
+                       processed_frames_sha256=pixel_digest.hexdigest() if runtime.hash_frames else None,
+                       processed_frames_hash_semantic='SHA256 of ordered SHA256(shape JSON + dtype.str + pixel bytes) digests',
+                       publication_count=publication_count,
                        throughput_fps=count*1e9/elapsed if elapsed else 0,
                        processing_fps=1000/(pre+proc) if pre is not None and pre+proc else None,
                        cpu_utilization_percent=cpu/elapsed*100 if elapsed else 0,

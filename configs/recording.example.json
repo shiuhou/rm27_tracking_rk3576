@@ -1,0 +1,33 @@
+{
+  "camera": {
+    "device": "/dev/video0",
+    "backend": "v4l2",
+    "capture_type": "auto",
+    "width": null,
+    "height": null,
+    "fps": null,
+    "fourcc": null,
+    "buffer_count": 4,
+    "timeout_s": 2.0,
+    "restart_attempts": 2,
+    "restart_delay_s": 0.25
+  },
+  "processing": {
+    "fps": 30.0,
+    "width": 320,
+    "height": 240,
+    "grayscale": true,
+    "max_frames": null
+  },
+  "runtime": {
+    "queue_capacity": 2,
+    "queue_policy": "latest",
+    "duration_s": 10.0,
+    "log_every": 30,
+    "hash_frames": false,
+    "opencv_threads": 1
+  },
+  "recording": {
+    "max_bytes": 1073741824
+  }
+}

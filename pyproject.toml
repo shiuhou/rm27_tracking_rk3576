@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rm27-tracking"
-version = "0.2.0"
+version = "0.3.0"
 description = "Generic embedded vision acquisition and offline replay research"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24,<3"]
@@ -17,6 +17,7 @@ opencv = ["opencv-python-headless>=4.8,<6"]
 rm27-replay = "rm27_tracking.replay:main"
 rm27-vision = "rm27_tracking.capture:main"
 rm27-benchmark = "rm27_tracking.benchmark:main"
+rm27-calibrate = "rm27_tracking.calibrate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import cv2
 
-from .pipeline import ProcessingConfig, ReplaySource
+from .pipeline import ProcessingConfig, open_replay
 from .runtime import RuntimeConfig, run_pipeline
 
 
@@ -18,8 +18,8 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def run(input_path, output_path, config):
-    source = ReplaySource(input_path, config.fps)
+def run(input_path, output_path, config, allow_incomplete=False):
+    source = open_replay(input_path, config.fps, allow_incomplete=allow_incomplete)
     output = Path(output_path).resolve()
     # Avoid contaminating the source dataset or overwriting source files.
     if source.path == output or (source.path.is_dir() and source.path in output.parents):
@@ -41,13 +41,15 @@ def main(argv=None):
     parser.add_argument("input", type=Path, help="image, image directory (lexical order), or video file")
     parser.add_argument("--out", type=Path, required=True, help="new output directory")
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--allow-incomplete", action="store_true",
+                        help="replay only the verified complete prefix of an incomplete recording")
     args = parser.parse_args(argv)
     try:
         values = json.loads(args.config.read_text()) if args.config else {}
         if not isinstance(values, dict):
             raise ValueError("configuration must be a JSON object")
         config = ProcessingConfig(**values)
-        summary = run(args.input, args.out, config)
+        summary = run(args.input, args.out, config, allow_incomplete=args.allow_incomplete)
     except (OSError, ValueError, TypeError, RuntimeError, cv2.error) as exc:
         parser.exit(1, f"replay failed: {exc}\n")
     print(json.dumps(summary, allow_nan=False))

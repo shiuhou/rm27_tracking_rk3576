@@ -1,8 +1,10 @@
 # rm27_tracking
 
 Lightweight general-purpose vision acquisition, preprocessing and measurement
-for future RK3576 Linux research. S2 extends the S1 package and CLI: the same
-runner handles camera and file sources. No target engagement, armor selection,
+for future RK3576 Linux research. The shared runner supports original-payload
+recording/replay, calibration estimates and real-input benchmarks. S3.5 adds
+tested one-memory-plane V4L2 multiplanar capture, calibration loading and ARM64
+userspace verification. No target engagement, armor selection,
 collision guidance, attack-related reacquisition or actuator output is included.
 
 ## Install, build and test
@@ -32,7 +34,8 @@ PYTHONPATH=src /home/shiuhou/venvs/mujoco/bin/python -m rm27_tracking.replay \
   /absolute/path/to/video.mp4 --config configs/replay.json --out artifacts/replay-001
 ```
 
-The platform probe reads versions/build flags only; it never opens a device.
+The default platform probe reads versions/build flags without device access.
+Explicit `--device`/`--media` arguments enable read-only capability queries (below).
 `gst-launch-1.0` being installed does not establish Python OpenCV GStreamer
 support. The selected venv reports GStreamer:NO, distro OpenCV reports YES.
 S2 uses direct V4L2 because OpenCV capture does not expose the required kernel
@@ -46,14 +49,18 @@ requires a multiplanar/ISP path that the current adapter cannot support.
 → processor(image) → results / preview / JSONL / resource metrics`
 
 - `pipeline.py` retains S1 `Frame`, `ReplaySource`, `ProcessingConfig` and
-  `preprocess`. `Frame` adds `stream_id` and optional `source_sequence`.
-- `camera.py` provides direct single-planar V4L2 MMAP capture; `formats.py`
+  `preprocess`. `Frame` includes stream/source sequence and optional original receipt,
+  replay receipt and acquisition metadata; existing callers retain their defaults.
+- `camera.py` provides direct V4L2 MMAP capture through single-planar or
+  one-memory-plane multiplanar APIs; `formats.py`
   converts negotiated payloads to owned uint8 BGR arrays.
 - `runtime.py::run_pipeline` is shared by replay, camera and benchmarks.
   `processor` is a callable receiving the processed image. The default generic
   processor reports channel mean/stddev using OpenCV, with no robotics semantics.
 - `replay.py` retains `rm27-replay`; `capture.py` adds explicit `rm27-vision`;
-  `benchmark.py` adds `rm27-benchmark` and reuses the actual file decoder.
+  `benchmark.py` provides `rm27-benchmark` through the same decoders.
+- `recording.py` owns the versioned raw-payload format; `calibrate.py` provides
+  `rm27-calibrate` using OpenCV checkerboard detection and pinhole calibration.
 
 `preprocess()` returns pixels independent of the input. An OpenCV transformation
 already owns its output, so S2 removes the redundant final copy in transformed
@@ -98,7 +105,7 @@ Compare decoded count against external expected counts when completeness matters
 `max_frames` in the replay config validates only the selected prefix; background
 acquisition is capped to that same prefix in the default `block` mode.
 
-Replay timestamps remain `round(sequence * 1e9 / configured_fps)`, domain
+Ordinary image/video replay timestamps remain `round(sequence * 1e9 / configured_fps)`, domain
 `replay`, semantic `synthetic_sequence_fps`. Container PTS, variable-rate timing
 and exposure timestamps are not inferred. `received_monotonic_ns` records host
 receipt separately. `configs/replay.json` contains processing choices, not camera
@@ -107,14 +114,14 @@ converts BGR to gray, and optional `max_frames` bounds the run. Unknown keys fai
 
 ## Linux camera and RK3576 configuration
 
-No physical camera was opened during S2. After device identification, edit a
+No physical camera was opened during S2, S3 or S3.5. After device identification, edit a
 copy of `configs/rk3576.example.json`, then run explicitly on the camera host:
 
 ```bash
 rm27-vision --config configs/rk3576.example.json --out artifacts/camera-001
 ```
 
-This nested JSON has `camera`, `processing`, `runtime` sections. Device path,
+This nested JSON has `camera`, `processing`, `runtime` and optional `recording` sections. Device path,
 width/height, FPS and FOURCC are configurable. Optional camera mode values are
 null by default because no sensor/mode has been verified. `processing.fps` is a
 replay clock setting; it does not command a camera (use `camera.fps`). Requests
@@ -125,13 +132,17 @@ colorimetry, driver and kernel buffer count. Rejected/unsupported formats fail.
 the live CLI uses the nested S2 file. `CameraConfig`/`CameraSource` remain
 importable from `pipeline` for S1 callers.
 
-Supported progressive linear single-planar formats: **NV12, NV21, YUYV, UYVY,
+Supported progressive linear formats: **NV12, NV21, YUYV, UYVY,
 BGR3, RGB3, GREY, MJPG**. Padded row strides are respected. YUV conversion uses
 OpenCV BT.601 limited range; driver-declared other/unknown colorimetry is rejected
-rather than misconverted. Multiplanar-only nodes (including NM12/NM21), tiled
-layouts, interlaced frames and ISP/media-graph setup are currently unsupported.
-A real RK3576 BSP may expose only such paths; that is a deployment blocker,
-not a reason to claim the current adapter has been qualified.
+rather than misconverted. `camera.capture_type` is `auto` (prefer single-planar
+if advertised, otherwise multiplanar), `single` or `mplane`. The multiplanar API
+currently requires exactly **one memory plane**, including contiguous NV12/NV21;
+negotiated type/plane count and per-frame length/bytesused/data_offset are retained.
+Raw recording keeps the prefix through `bytesused`; decoding begins at
+`data_offset`. Separate-memory-plane formats such as NM12/NM21, tiled layouts,
+interlaced frames and ISP/media-graph configuration remain unsupported. This
+host-tested adapter still needs qualification against the selected BSP.
 
 Each frame carries kernel `source_sequence`, raw buffer timeval scaled to ns,
 and timestamp flags: clock domain is `v4l2_monotonic` only when flagged, otherwise
@@ -147,8 +158,119 @@ A disconnect/read timeout closes MMAP buffers and the fd, then consumes one of
 and interruptible; exhausted retries fail with an error. The example opts into
 two retries, a 2-second read timeout and a 60-second overall duration. The live
 CLI requires a duration or frame cap. Direct API consumers must call `close()`
-in `finally` when they stop early. Sources are single-use. Sensor exposure/gain,
-triggering, hardware sync and automatic camera probing are not implemented.
+in `finally` when they stop early. Sources are single-use. Standard exposure-auto,
+absolute-exposure, priority and legacy exposure controls are queried read-only once
+per open. Their availability, bounds, flags, values, units, query times and provenance
+are recorded. Absolute exposure uses the UAPI unit of 100 microseconds; legacy
+exposure units stay driver-defined/unverified. Readbacks are not frame-synchronized
+exposure measurements. No exposure control is changed. Triggering, hardware sync,
+gain control and automatic camera probing are not implemented.
+
+## Original-payload recording and exact replay
+
+After identifying a supported device/mode, opt in using
+`configs/recording.example.json` (10-second run, 1 GiB payload limit; modes remain
+null until selected). Recording requires **both** a positive `recording.max_bytes`
+and a duration/frame cap. Example commands, to run on the selected camera host:
+
+```bash
+rm27-vision --config configs/recording.example.json --out artifacts/capture-001
+rm27-replay artifacts/capture-001/recording/manifest.json --out artifacts/exact-replay-001
+# Explicit recovery of an interrupted recording's verified complete prefix:
+rm27-replay artifacts/interrupted/recording --allow-incomplete --out artifacts/recovered-001
+```
+
+`recording/manifest.json` identifies schema version 1 and completion status;
+`payload.bin` is append-only exact `bytesused` data; `frames.jsonl` indexes offsets,
+lengths and SHA256 along with negotiated FOURCC/dimensions/stride/sizeimage/
+colorimetry, driver flags, sequence, stream epoch and source/host timestamps.
+Read-only exposure snapshots are retained in the negotiated-format metadata.
+Records are written synchronously **before QBUF and before application queue
+eviction**, with no second writer queue. A recorded frame may therefore have no
+processed result. A successful raw append reserves its application sequence even
+if QBUF then fails. Empty restart epochs and legitimate source gaps are counted;
+duplicate/out-of-order records and backward epochs are rejected.
+
+The byte limit bounds payload bytes, excluding JSON metadata. The next whole
+frame is declined before writing if it would exceed the limit; stop reason is
+`recording_byte_limit`. No existing output directory is overwritten. Storage or
+finalization failures leave the recording incomplete and fail the run; complete
+index entries and partial tail evidence are retained. Writes returning do not
+promise disk durability. Per-payload write time and bounded P50/P95/P99 full
+append overhead are reported. A host-only probe writing 128 synthetic 640×480
+NV12 payloads (56.25 MiB) measured mean 0.463 ms and P50/P95/P99
+0.453/0.609/0.638 ms per append, and all 128 replayed exactly. This measured
+application writes through the host page cache, with no fsync or camera; it is
+not board/storage durability throughput. Slow storage can cause real driver drops; host
+fixtures cannot measure that effect on a camera.
+
+Replay checks every selected record's bounds, hash, order, epoch, format and
+colorimetry using the existing converter. Complete recordings also require exact
+final counts/file sizes. Incomplete recordings need `--allow-incomplete`; only a
+verified complete prefix is delivered, and corruption still fails. Selected
+`max_frames` prefixes do not certify unread tails. Replay holds one payload at a
+time and releases it before yielding owned BGR pixels. Index/manifest records
+are capped at 1 MiB; `RecordingSource` defaults to a 128 MiB per-frame raw/declared
+BGR allocation guard (Python API override for larger future modes). This is not
+an adversarial compressed-media decoder sandbox.
+
+Recorded `timestamp_ns`, `received_monotonic_ns` and all acquisition metadata
+remain original. `original_received_monotonic_ns` explicitly names the original
+receipt; `replay_received_monotonic_ns` is freshly measured on the replay host.
+Current performance intervals use the fresh receipt, including when the original
+host clock epoch is numerically greater than today's host clock.
+
+## Checkerboard calibration estimates
+
+Provide native-resolution checkerboard images, a recording directory/manifest,
+or video. Declare the **inner** corner columns/rows and physically measured square
+side/unit; there are no assumed board dimensions. Set the following shell values
+from your board measurement and experiment's acceptable evaluation error:
+
+```bash
+rm27-calibrate /absolute/path/to/checkerboard-images --out artifacts/calibration-001 \
+  --inner-columns "$INNER_COLUMNS" --inner-rows "$INNER_ROWS" \
+  --square-size "$MEASURED_SQUARE_SIDE" --square-unit "$SQUARE_UNIT" \
+  --max-evaluation-error-px "$MAX_EVALUATION_ERROR_PX" \
+  --sample-step 1 --max-candidates 300 --max-views 60
+```
+
+Work is deterministic and bounded: at most `max_candidates * sample_step` decoded
+frames, detection every `sample_step`, at most `max_views` distinct observations.
+Mixed native image sizes fail. Default minimum is 15 accepted views (12 fit,
+3 evaluation); every fifth accepted view is reserved for evaluation before fitting.
+An explicit `--min-views` can adjust this, with a floor of 10. Distinctness uses
+pixel hashes and corner displacement (default 1 px); frontoparallel/degenerate
+view collections are rejected by the planar-constraint conditioning check.
+Acquire varied board poses and image coverage; these numerical checks cannot
+validate a physical board, lens or installation.
+
+OpenCV fits a standard pinhole model with exactly `k1,k2,p1,p2,k3`. Held-out board
+poses are solved using frozen intrinsics; they never enter intrinsic fitting.
+`quality.json` reports accepted/rejected views and reasons, image coverage,
+overall/per-view fitting error and held-out RMS errors. Export requires **every**
+held-out view to meet your declared error threshold. Insufficient, degenerate,
+nonfinite or threshold-failing solutions yield no `calibration.json`; poor detected
+views are not silently removed to obtain a pass. Successful exports include board
+measurement declarations, source/pixel/payload hashes, image size, coefficients
+and quality, labeled **calibration estimates requiring physical validation**.
+No automatic pipeline undistortion is introduced. Generated checkerboard tests
+validate software only. Real calibration is **BLOCKED** pending suitable real
+images and a measured physical target.
+
+Load an exported estimate while enforcing its native resolution:
+
+```python
+from rm27_tracking.calibrate import load_calibration
+estimate = load_calibration("artifacts/calibration-001/calibration.json",
+                            image_size=(native_width, native_height))
+```
+
+The loader rejects invalid/nonfinite matrices, unsupported distortion models,
+inconsistent quality gates and resolution mismatches. It does not rescale or
+undistort. Match the physical camera, lens, focus, sensor/ISP crop and resolution
+to the calibration session. An existing OS04A10 circle-grid calibration from
+another component/session is not a calibration for the selected forward camera.
 
 ## Reproducible benchmarks and measurements
 
@@ -164,7 +286,8 @@ channel statistics. Fixture generation/hashing is outside the run timing.
 The generated AVI hash and decoder versions are recorded; different codec
 versions can produce different fixture bytes. These are synthetic host workloads.
 
-Runs write `summary.json`, sampled `frames.jsonl`, `resources.jsonl` and the first
+Runs write `summary.json`, sampled `frames.jsonl`, separate `publications.jsonl`,
+`resources.jsonl` and the first
 processed `preview.png`. Replay additionally writes ordered `inputs.jsonl`
 paths/hashes. Keep source files immutable during a run. Frame logging frequency
 and processed-pixel hashing are configurable; frame logs grow with the chosen
@@ -172,17 +295,25 @@ sample rate, resources are sampled at most once per second. No per-frame images
 are retained. Runtime statistics use constant memory for arbitrary run length.
 
 Summary metrics include acquisition throughput/latency, preprocessing and generic
-processor throughput, stage means/max/P95, queue wait/depth/drops, host residence,
+processor throughput, stage means/max/P50/P95/P99, queue wait/depth/drops, host residence,
 CPU time/utilization and RSS samples. Acquisition duration includes source decode
 or MMAP format conversion; in a paced benchmark it also includes deliberate wait.
 Processing FPS is compute-only reciprocal of mean preprocess+processor time.
 Wall throughput includes pipeline I/O and instrumentation. CPU utilization is
 process CPU / wall time ×100; more than 100% means more than one CPU core's time.
 Linux `/proc/self/statm` supplies sampled RSS; process-lifetime `ru_maxrss` is
-reported separately. P95 uses an all-sample log histogram with 1.03 bucket ratio
+reported separately. P50/P95/P99 use an all-sample log histogram with 1.03 bucket ratio
 (upper-edge approximation error <=3% of latency plus 1 µs). Host residence starts
-at application receipt and is **not sensor-to-result latency**. No stage compares
-unrelated driver and host clock domains.
+at the current host receipt and ends after the selected output operation; it is
+**not sensor-to-result latency**. Each logged result records host-monotonic
+preprocess/processor start/end and output start. A separate publication event is
+written after its frame JSONL flush (and the first preview write) has returned.
+Publication is application operation completion, not disk durability, and applies
+only to selected outputs. `host_to_processing_complete` covers all frames. No
+stage compares unrelated driver and host clock domains; camera-to-output remains
+unavailable without a verified clock relationship. With hashing enabled,
+`processed_frames_sha256` covers every processed frame in order regardless of log
+sampling, including shape/dtype and pixels; source times are excluded.
 
 Host results on 2026-10-29 (America/New_York), x86_64 Linux, Python 3.12.3,
 OpenCV 5.0.0 / NumPy 2.5.1, one OpenCV thread, application queue capacity 2:
@@ -202,19 +333,99 @@ queue overflow test deliberately uses a slow processor and verifies drop counts
 and high-water depth. Actual camera FPS/drops, RK3576 CPU/RAM and thermal
 stability have **not been measured**.
 
-## ARM64 native setup and validation gate
+S3 real-input host runs on 2026-10-31 (Asia/Shanghai) used the existing read-only
+`rm27_drones/rm27/perception/vision/video/0921.mp4`: 230,317,363 bytes,
+SHA256 `437d72cb0030cdb33d1ea8377b2d61e234280813dbb83c85ab3c8e3e44fe50bb`.
+Hash was computed before analysis and rechecked unchanged afterwards. Decoded
+size is 1344×760; 13,766 frames were decoded in each full pass, matching the
+reported count; nominal 180 FPS is an encoded-stream property. Parent reference
+`rm27/perception/vision/docs/VSL-1A_0921.md` attributes this hash to a user-provided
+M3C/OS04A10 recording. This supports historical attribution, not verified sensor,
+exposure, synchronization or sensor-drop provenance.
 
-No usable ARM64 sysroot/AArch64 GCC/QEMU or RK3576 execution environment was
-available. Clang's presence alone cannot validate target dependencies or runtime.
-This project builds a pure-Python wheel; that portability tag is not an ARM64
-camera test. No ARM64 cross-build or board execution is claimed.
-
-For an Ubuntu/Debian-like ARM64 BSP that supplies suitable packages, prospective
-native commands are below (not executed in this task; package names/versions and
-permissions must match the selected BSP):
+Reproduce the real-input runs (each output directory must be new):
 
 ```bash
-sudo apt install python3-venv python3-opencv python3-numpy python3-setuptools python3-wheel build-essential linux-libc-dev
+VIDEO=/absolute/path/to/0921.mp4
+rm27-benchmark --input "$VIDEO" --fps 180 --complete --out artifacts/s3-real-pass1
+rm27-benchmark --input "$VIDEO" --fps 180 --complete --out artifacts/s3-real-pass2
+rm27-benchmark --input "$VIDEO" --fps 180 --seconds 60 --paced --out artifacts/s3-real-paced
+```
+
+These **sequential**, separate processes used x86_64 Linux/Python 3.12.3,
+OpenCV 5.0.0/NumPy 2.5.1/rm27_tracking 0.3.0, one OpenCV thread, queue capacity 2
+with `block`, resize to 320×240 grayscale and generic mean/stddev, hashing every
+processed output and logging every 60th. Decoder-internal threading is not limited
+by `opencv_threads`; CPU can exceed one core. Source hashes, full configurations,
+versions and exact implementation-file hashes are in each benchmark summary.
+
+| Real encoded-video run | Processed | Wall FPS | Compute FPS | Preprocess+processor P50 / P95 / P99 ms | CPU | Max RSS MiB | Queue drops / high water |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | --- |
+| Full pass 1, 34.82 s | 13,766 | 395.32 | 415.42 | 2.448 / 2.522 / 2.838 | 242.33% | 134.09 | 0 / 2 |
+| Full pass 2, 35.41 s | 13,766 | 388.80 | 409.33 | 2.448 / 2.597 / 3.815 | 246.92% | 134.72 | 0 / 2 |
+| Paced, 60.00 s | 10,797 | 179.94 | 407.62 | 2.448 / 2.675 / 4.047 | 113.32% | 131.08 | 0 / 1 |
+
+Unpaced acquisition/decode-call means were 0.521 and 0.687 ms (P95 1.240 and
+1.990 ms); their reciprocals describe source-call work, not achieved end-to-end
+throughput. Paced acquisition includes intentional waiting (mean 5.539 ms).
+The full passes have identical ordered processed-pixel digest
+`d5c5d4f27d5fe3b46879954653408cb64d478b95e2bee1d15fad8575c1d7fde0`.
+All 180 sampled paced-output hashes match the corresponding full-pass prefix;
+its shorter duration-selected sequence has a different aggregate digest, as
+expected. There were no application sequence gaps. These observations cannot
+recover original sensor drops or exposure latency from encoded video.
+
+Evidence is `artifacts/s3-real-{pass1,pass2,paced}/run/summary.json` and adjacent
+sampled frame/publication/resource logs. Every stage includes P50/P95/P99.
+Paced sampled RSS grew 10.36 MiB from decoder initialization; after 10 seconds
+it stayed 130.59–131.08 MiB, ending 0.49 MiB above that interval's first sample.
+This 60-second observation does not establish long-term leak freedom or RK3576
+resource behavior. The old S2 synthetic runs above have different input and
+instrumentation and are not a performance comparison.
+
+## ARM64 installation and verified scope
+
+**ARM64 EMULATED: PASS.** `scripts/verify_arm64.py` builds the portable 0.3.0
+wheel, installs it outside the checkout in pinned AArch64 Python userspace and
+runs tests, all four CLIs, deterministic video replay/benchmark and missing-camera
+failure under QEMU. Python, NumPy and OpenCV ELF machine types and loaded shared
+libraries are recorded. There are no privileged containers, host binfmt changes
+or camera mounts. This verifies ARM64 software execution, not RK3576 performance,
+camera access or a vendor BSP.
+
+Final emulated suite: **61 run, 60 passed, 1 compiler check skipped**, with one
+native-speed timeout test excluded and separately checked as described below.
+
+Reproduce on Linux x86_64 with Docker, `dpkg-deb`, a host C compiler (`cc`) with
+static libc, and Python with pip/setuptools/wheel; internet is needed for pinned
+dependencies. Clang enables the additional
+target ABI compilation; its absence is reported as NOT_RUN.
+
+```bash
+python scripts/verify_arm64.py --out artifacts/arm64-check
+```
+
+Verified environment: QEMU 8.2.2, Debian 12 AArch64, Python 3.12.3,
+NumPy 2.2.6, OpenCV headless 4.11.0. The script pins the container digest and
+SHA256 values for the emulator, ARM64 wheels and target headers. Evidence under
+`artifacts/s35-arm64-final/` includes exact wheel/source hashes and shared-library
+paths. The wheel bundles codec/OpenBLAS libraries; glibc, libstdc++, libgcc_s,
+libm and zlib come from the container and still need verification on the BSP.
+The C header test is skipped in the compiler-free guest; its sizes, alignments,
+field offsets and ioctl values are instead **CROSS-COMPILED: PASS** against
+AArch64 Linux 6.8 UAPI headers with Clang 18.1.3 (AArch64 ELF object, no device
+access). A tiny static host bridge starts ARM64 Python subprocesses through
+explicit QEMU, including the original replay CLI test. The platform test's
+0.2-second timeout assumes native startup speed and is excluded under emulation;
+the same ARM64 timeout/kill/reap path is checked separately with a declared
+2-second allowance. Original host tests and application defaults are unchanged.
+
+Retain native installation for an Ubuntu/Debian-like ARM64 BSP. The following
+commands require board access and BSP-supported package versions; they have
+**not** been run on RK3576:
+
+```bash
+sudo apt install python3-venv python3-opencv python3-numpy python3-setuptools python3-wheel build-essential linux-libc-dev v4l-utils
 python3 -m venv --system-site-packages .venv
 . .venv/bin/activate
 python scripts/check_platform.py
@@ -222,21 +433,84 @@ python -m pip install --no-deps --no-build-isolation .
 python -m unittest discover -s tests -v
 python -m pip wheel --no-deps --no-build-isolation . --wheel-dir dist
 rm27-benchmark --seconds 60 --paced --queue-policy latest --out artifacts/arm64-replay-001
-# After selecting/verifying camera node and supported modes:
-rm27-vision --config configs/rk3576.example.json --out artifacts/arm64-camera-001
 ```
 
-The native test suite compiles a tiny probe against **that host's** Linux headers
-to compare ctypes sizes/ioctl constants. This passed on x86_64 only; rerun on
-ARM64 to validate its ABI. Run recorded-media replay before camera tests, then a
-longer configured camera duration under representative image-processing load.
-Keep negotiated format, source clock provenance, expected vs observed frame rate,
-CPU/RSS/queue measurements and board/OS/driver versions with the run evidence.
+The native test suite compiles a probe against **that host's** Linux headers;
+rerun it on the board to check its actual ABI. The pure-Python wheel has no
+project C++ runtime or camera SDK dependency. Distro/BSP OpenCV remains supported;
+do not replace its ISP/codecs with a pip distribution without checking the BSP.
+
+## RK3576 camera evidence and first boot
+
+The forward camera sensor is **OS04A10**, confirmed by the user with Sipeed's
+camera page. The downward camera is undecided. The RK3576 BTB board/carrier
+manufacturer, revision, pinout and BSP are awaiting the user's later information.
+No physical `/dev/video*` or media node is available on this host.
+
+| Primary evidence | What it establishes / remaining boundary |
+| --- | --- |
+| Sipeed camera comparison [1] | OS04A10 is a rolling-shutter sensor, listed at 2688×1520 with 2.9 µm pixels. Sipeed's advertised modes/lens apply to its module/MaixCAM integration; they do not qualify the purchased lens or RK3576 connection. |
+| Rockchip RK3576 product page [2] | Linux SDK, MIPI CSI and ISP exist at SoC level. Carrier lane wiring, connectors and supported camera modes still require vendor files. |
+| Rockchip kernel `77168c8d…`, `drivers/media/i2c/os04a10.c` [3] | A driver exists with `ovti,os04a10`, endpoint-selected two/four-lane modes, RAW10, 24 MHz xvclk, supply/reset resources and module/lens metadata. This is reference implementation evidence, not proof that the selected BSP includes it or that a module is electrically compatible. |
+| Same kernel, ISP `capture.c` and `capture_v32.c` [3] | The ISP exposes VIDEO_CAPTURE_MPLANE; contiguous NV12 uses one memory plane and NV12M uses two. This justifies the tested one-memory-plane adapter. The actual board's node, stride and format remain unverified. |
+
+The pinned reference kernel is not a required BSP version. Obtain the vendor's
+matching kernel/config, carrier schematic/pinout, sensor driver/device tree and
+ISP/IQ tuning files. Verify power rails, reset/power-down, I2C address, xvclk,
+endpoint/data lanes and CSI routing **before connecting** the module. Do not
+derive pin assignments or a device tree from the sensor name. Exposure control
+register values and driver timestamp flags alone do not establish physical
+exposure timing, rolling-shutter readout or cross-camera synchronization.
+
+After the vendor media graph is configured and native replay tests pass, collect
+read-only evidence from the identified nodes (replace the examples with the actual
+nodes; repeat `--device` for the eventual second camera):
+
+```bash
+python scripts/check_platform.py --device /dev/video0 --media /dev/media0 --out artifacts/board-probe-001
+# If exposure controls live on an identified sensor subdevice:
+v4l2-ctl -d /dev/v4l-subdev0 --list-ctrls-menus
+```
+
+The collector records platform/kernel/dependency versions, capability/format/FPS/
+control queries and media topology. Queries have a 10-second deadline and retain
+at most 64 KiB each with explicit truncation; failures remain FAIL/BLOCKED. It
+does not set controls/formats or start streaming. Required UAPI evidence:
+`VIDIOC_QUERYCAP` (device_caps and
+VIDEO_CAPTURE vs VIDEO_CAPTURE_MPLANE/STREAMING), `VIDIOC_ENUM_FMT` for each
+advertised type, `VIDIOC_ENUM_FRAMESIZES`/`VIDIOC_ENUM_FRAMEINTERVALS`, and
+`VIDIOC_G_FMT` negotiated width/height/FOURCC/field/colorimetry. For multiplanar,
+record num_planes and every plane's bytesperline/sizeimage, plus DQBUF
+bytesused/data_offset and flags. Record G_PARM and QUERYCTRL/G_CTRL or
+QUERY_EXT_CTRL/G_EXT_CTRLS read-only exposure availability/units. These are queries
+to perform on the selected board; none were executed against physical hardware.
+
+Copy `configs/recording.example.json` to an ignored artifact path and set the
+verified device/mode; choose `capture_type` from the node capabilities. Keep the
+10-second/1 GiB limits for a first recording, then use the same replay pipeline:
+
+```bash
+cp configs/recording.example.json artifacts/board-probe-001/camera.json
+# Edit camera.json using the negotiated device, mode and supported FOURCC.
+rm27-vision --config artifacts/board-probe-001/camera.json --out artifacts/board-capture-001
+rm27-replay artifacts/board-capture-001/recording/manifest.json --out artifacts/board-replay-001
+rm27-benchmark --input artifacts/board-capture-001/recording/manifest.json --complete --out artifacts/board-bench-001
+```
+
+Inspect hashes, epochs/sequences, clock flags, negotiated layout, drops and host
+intervals before making capture-timing claims. Next collect varied native-resolution
+checkerboard views with measured board dimensions and run the calibration command
+above. Finally test disconnect/restart and sustained capture under representative
+load, retaining CPU/RSS/queue/thermal observations and board/driver versions.
 
 RKNN preparation is deferred: there are no models/inference implementations in
 this repository to adapt. A future optional backend needs a chosen model,
 pre/postprocess contract and matched RKNN conversion/runtime versions. The CPU
 pipeline remains independent of RKNN, and there are no invented NPU measurements.
+
+[1]: https://wiki.sipeed.com/hardware/en/maixcam/cameras.html
+[2]: https://www.rock-chips.com/a/en/products/RK35_Series/2024/1212/2033.html
+[3]: https://github.com/rockchip-linux/kernel/tree/77168c8d5ab82399f65a80e9f807b50ba37cf483
 
 ## Existing code review and reuse decision
 
@@ -248,10 +522,14 @@ Paths below are relative to that third-party repository unless noted.
 
 | Existing component | Reuse assessment |
 | --- | --- |
+| `main/src/nv21_pipeline.cpp` | Stride/ROI checks and YUV sampling are generic, but output and callers use Maix/target types. Existing `formats.py` and `preprocess` already cover the required layout/resize behavior. |
+| `main/src/visual_motion.cpp` | Gray downsampling, feature selection/tracking and similarity RANSAC are portable in isolation; the update path consumes Maix images and target motion priors. No current generic feature consumer requires a port. |
+| `main/src/green_detector_core.cpp`, `main/include/dart/center_kalman.hpp` | Coordinate/distortion math and a small filter are separable, but association uses target schemas. OpenCV calibration/geometry already supplies the needed primitives; no target tracker is imported. |
 | `tools/video_replay/maix_image_opencv.cpp` | Uses OpenCV image operations behind a Maix compatibility layer, with blob/target-specific behavior. Reuse OpenCV primitives directly; do not copy the compatibility implementation. |
 | `tools/video_replay/video_replay.cpp`, `CMakeLists.txt` | Existing host replay links detector, target fusion and motion code. Reuse the file-decoding approach without importing these dependencies. |
 | `main/include/dart/async_frame.hpp` | Generic owned-frame metadata, latest-frame slot and timestamp scheduler are future C++ extraction candidates. The S2 Python runtime supplies its own small bounded producer queue; no C++ port is needed. |
-| `tools/os04a10_highfps/frame_continuity.hpp` | Portable sequence-gap and PTS checks; useful once verified hardware sequence/clock metadata exists. Application replay indices cannot stand in for sensor counters. |
+| `tools/os04a10_highfps/frame_continuity.hpp` | Portable sequence-gap/PTS checks; the existing child validator already covers gaps, uint32 wrap and restart epochs. Application replay indices cannot stand in for sensor counters. |
+| `tools/os04a10_highfps/vin_nv21_frame.hpp` | AX frame/MMAP/release ownership is hardware-specific. Reuse the lifetime discipline, retaining this repository's V4L2 ownership implementation. |
 | `main/src/config.cpp` | Parser depends on detector settings. Standard-library JSON replaces that dependency for generic configuration. |
 | Parent `rm27/perception/vision/localization/manifest.py` | Explicit clock semantics, provenance and exposure-verification rules are reusable design conventions. Do not relocate or change localization infrastructure for this task. |
 | Parent `rm27/perception/vision/localization/analyze_video.py` | Uses OpenCV, NumPy, hashes and offline diagnostic outputs. Reuse those underlying libraries; its VSL qualification schema and external-tool workflow stay with localization. |
@@ -273,39 +551,72 @@ The initial commit contains the S1/S2 source, configurations, tests and build
 instructions. Generated media, benchmark logs, virtual environments, build
 outputs and local engineering plans/run records remain ignored.
 
-Remote existence, authentication and the first push still require verification:
-network access was blocked during publication preparation. No credentials are
-stored in this repository; GitHub access must use the owner's existing auth.
+S1/S2 baseline commit is `e8a9ac85522c9ed70cb68722c6fec8459be3e653`.
+S3/S3.5 extend it with reproducible recordings, calibration and ARM64 preparation.
+Use `git log -1` and `git ls-remote --heads origin main` to check publication state.
+No credentials are stored in this repository.
 
-The parent `.gitmodules` retains an **inactive commented template** for
-`components/rm27_tracking`. Publishing this child does not activate the parent
-integration. A usable submodule needs a published child commit and a parent
-mode-160000 gitlink. Register/pin the selected child commit in a separately
-reviewed parent change, then verify a fresh recursive clone.
+The parent working `.gitmodules` contains an active URL registration for
+`components/rm27_tracking`, but its index has **no mode-160000 gitlink** at this
+path. This pre-existing parent state was left untouched. A usable submodule
+needs a published child commit and a parent gitlink. Publishing this child alone
+does not complete parent integration.
+
+For an explicitly authorized child release, synchronization commands are below
+(run from this component, review the staged diff, use the owner's identity only
+for the commit, and authenticate as `shiuhou` through the existing credential
+manager/SSH setup; never embed credentials in the URL):
+
+```bash
+git diff --check
+git add -- README.md pyproject.toml configs scripts src tests
+git diff --cached --stat
+git -c user.name=shiuhou -c user.email=uhshi371@connect.hkust-gz.edu.cn commit -m "Prepare reproducible camera data and ARM64 validation"
+git push origin HEAD:main
+```
+
+Parent synchronization needs separate authorization: stage the child gitlink
+with `git -C ../.. add -- components/rm27_tracking` and selectively stage only
+the tracking registration with `git -C ../.. add -p -- .gitmodules`. Review the
+parent staged diff and commit it separately, preserving unrelated changes. Verify
+a fresh recursive clone after both commits are published.
 `git submodule absorbgitdirs components/rm27_tracking` may then normalize
-Git-directory storage. This package builds and runs without the parent.
+Git-directory storage when run from the parent. This package builds and runs
+without the parent.
 
 ## Validation and remaining hardware requirements
 
 S1's five tests passed before edits. S2 preserves its image/video ordering,
 preprocessing, failure reporting and CLI through the common runner; its obsolete
 OpenCV camera mock test was replaced by production V4L2 lifecycle tests.
-Current suite: **23 tests PASS** under both OpenCV 5.0/NumPy 2.5.1 and distro
-OpenCV 4.6/NumPy 1.26.4. Tests exercise real generated video CLI flow, image
-prefix limits, deterministic hashes/order, timestamps/provenance/restart epochs,
-known YUV colors and padding, MMAP ownership/requeue/partial-init cleanup, native
-UAPI ABI, bounded queues/drops, processor failures and cancellation during stalls.
-No physical camera was opened. The 0.2.0 wheel builds and installs outside the checkout; all 23 tests also
-pass from that installation. All three console entry points pass CLI checks;
-the installed benchmark runs and invalid live configuration fails before any
-device open. The owner subsequently authorized the initial commit and publication;
-the parent gitlink remains a separate integration change.
+S3 suite: **53 tests PASS** under both OpenCV 5.0/NumPy 2.5.1 and distro
+OpenCV 4.6/NumPy 1.26.4, retaining all 23 S2 tests. Added exact padded YUV/MJPEG
+payload round trips, hash/bounds/truncation/order/restart verification, byte limits,
+write/finalization failures, bounded recording/replay memory over 5,000 frames,
+record-before-eviction/requeue failure, read-only exposure queries, fresh replay
+clock epochs, publication ordering, deterministic real-video fixture passes and
+checkerboard detection/fitting/evaluation/export refusal. Generated calibration
+fixtures exercise software; they do not validate a real camera.
+
+S3.5 preserves those regressions and adds one-memory-plane UAPI/layout/ownership/
+cleanup tests, offset-preserving recording/replay with strict plane metadata,
+calibration loading/resolution checks, and bounded read-only platform queries.
+**HOST-ONLY: 62 tests PASS** on both OpenCV 4.6 and 5.0; all 62 also pass against
+the wheel installed outside the checkout. The original full-video S3 results
+above remain the real-input baseline and were not repeated for S3.5.
+The 0.3.0 wheel still builds without new runtime dependencies and is tested after
+installation outside the checkout. All four entry points, generated-video replay,
+exact raw replay, deterministic benchmark and expected camera/calibration failures
+are exercised. See the ARM64 section for its separate emulated-runtime and
+cross-compiled ABI results; neither is physical RK3576 validation.
 
 Remaining RK3576 requirements:
 
-- Identify board/BSP/ARM64 ABI, sensor, connection, media graph and driver node.
-- Verify negotiated progressive single-planar mode, colorimetry/stride, ISP output;
-  add a multiplanar adapter only if the real BSP requires it.
+- Obtain the board/carrier/BSP details when the user supplies them; forward sensor
+  OS04A10 is selected, downward camera is still undecided.
+- Qualify the actual driver/media graph, electrical connection, negotiated
+  progressive single-planar or one-memory-plane multiplanar mode, colorimetry,
+  stride and ISP output. Separate-memory-plane support needs actual format evidence.
 - Measure source clock semantics, timestamp quality, exposure/shutter behavior,
   sequence gaps and synchronization. Buffer flags alone are insufficient evidence.
 - Validate physical disconnect/reconnect, ioctl cancellation and sustained camera

@@ -1,6 +1,7 @@
 {
   "device": "/dev/video0",
   "backend": "v4l2",
+  "capture_type": "auto",
   "width": null,
   "height": null,
   "fps": null,

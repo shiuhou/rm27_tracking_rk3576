@@ -20,6 +20,15 @@ class Frame:
     received_monotonic_ns: int
     stream_id: int = 0
     source_sequence: int | None = None
+    original_received_monotonic_ns: int | None = None
+    replay_received_monotonic_ns: int | None = None
+    acquisition_metadata: dict | None = None
+
+    @property
+    def host_received_monotonic_ns(self):
+        """Receipt on this run's host clock; never subtract a recorded epoch."""
+        return (self.replay_received_monotonic_ns if self.replay_received_monotonic_ns is not None
+                else self.received_monotonic_ns)
 
 
 class FrameSource(Protocol):
@@ -122,8 +131,10 @@ class ReplaySource:
                         if sequence == 0:
                             raise ValueError("video contains no decodable frames")
                         break
+                received = monotonic_ns()
                 yield Frame(sequence, image, round(sequence * 1e9 / self.fps),
-                            "replay", "synthetic_sequence_fps", monotonic_ns())
+                            "replay", "synthetic_sequence_fps", received,
+                            replay_received_monotonic_ns=received)
                 sequence += 1
         finally:
             self.close()
@@ -151,6 +162,10 @@ class TimestampValidator:
         for name in ("sequence", "timestamp_ns", "received_monotonic_ns", "stream_id"):
             if type(getattr(frame, name)) is not int or getattr(frame, name) < 0:
                 raise ValueError(f"frame {name} must be a nonnegative integer")
+        for name in ("original_received_monotonic_ns", "replay_received_monotonic_ns"):
+            value = getattr(frame, name)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"frame {name} must be a nonnegative integer when present")
         if frame.source_sequence is not None and (type(frame.source_sequence) is not int or frame.source_sequence < 0):
             raise ValueError("invalid source_sequence")
         if not frame.clock_domain or not frame.timestamp_semantic:
@@ -159,8 +174,11 @@ class TimestampValidator:
         if previous is not None:
             if frame.sequence <= previous.sequence:
                 raise ValueError("application sequence is not strictly increasing")
-            if frame.received_monotonic_ns < previous.received_monotonic_ns:
+            if (frame.received_monotonic_ns < previous.received_monotonic_ns and
+                    not (frame.replay_received_monotonic_ns is not None and frame.stream_id > previous.stream_id)):
                 raise ValueError("host receipt clock regressed")
+            if frame.host_received_monotonic_ns < previous.host_received_monotonic_ns:
+                raise ValueError("current host receipt clock regressed")
             if frame.stream_id < previous.stream_id:
                 raise ValueError("stream epoch regressed")
             if frame.stream_id == previous.stream_id:
@@ -172,6 +190,15 @@ class TimestampValidator:
         if previous is None or previous.stream_id != frame.stream_id:
             self.streams += 1
         self.previous = frame
+
+
+def open_replay(path, fps=30, allow_incomplete=False):
+    """Use the same image/video decoder or the original-payload recording source."""
+    path = Path(path).resolve()
+    if (path.is_dir() and (path / 'manifest.json').is_file()) or path.name == 'manifest.json':
+        from .recording import RecordingSource
+        return RecordingSource(path, allow_incomplete=allow_incomplete)
+    return ReplaySource(path, fps)
 
 
 # Preserve S1 public imports; the old OpenCV camera adapter is retired.

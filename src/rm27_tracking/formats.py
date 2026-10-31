@@ -9,6 +9,17 @@ import numpy as np
 SUPPORTED_FORMATS = {"NV12", "NV21", "YUYV", "UYVY", "BGR3", "RGB3", "GREY", "MJPG"}
 
 
+def validate_colorimetry(fmt):
+    """Match linear YUV metadata to the converter's BT.601 limited range."""
+    if fmt['fourcc'] in {"NV12", "NV21", "YUYV", "UYVY"}:
+        colorspace = fmt.get('colorspace', 0)
+        encoding = fmt.get('ycbcr_enc', 0) or (2 if colorspace in {3, 12} else
+                                              (6 if colorspace == 10 else (8 if colorspace == 2 else 1)))
+        quantization = fmt.get('quantization', 0) or (1 if colorspace == 7 else 2)
+        if not colorspace or encoding != 1 or quantization != 2:
+            raise ValueError('YUV conversion requires driver-declared BT.601 limited-range colorimetry')
+
+
 def decode_buffer(payload, width: int, height: int, fourcc: str, stride: int = 0):
     """Return owned BGR pixels; input may be a borrowed MMAP buffer.
 

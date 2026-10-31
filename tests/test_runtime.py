@@ -191,9 +191,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(summary['mean_ms'], 50.5)
         self.assertGreaterEqual(summary['p95_ms'], 95)
         self.assertLessEqual(summary['p95_ms'], 95*1.031)
+        self.assertGreaterEqual(summary['p50_ms'], 50)
+        self.assertLessEqual(summary['p50_ms'], 50*1.031)
+        self.assertGreaterEqual(summary['p99_ms'], 99)
+        self.assertLessEqual(summary['p99_ms'], 99*1.031)
         for values in ({'queue_capacity': 0}, {'duration_s': float('inf')}, {'hash_frames': 1}):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 RuntimeConfig(**values)
+
+    def test_replay_clock_epoch_and_publication_order_are_separate(self):
+        class Recorded(Frames):
+            def __iter__(self):
+                for frame in super().__iter__():
+                    yield replace(frame, timestamp_ns=frame.sequence*1000,
+                                  clock_domain='v4l2_unknown', timestamp_semantic='driver_end_of_frame',
+                                  received_monotonic_ns=10**19 + frame.sequence,
+                                  original_received_monotonic_ns=10**19 + frame.sequence,
+                                  replay_received_monotonic_ns=monotonic_ns(),
+                                  acquisition_metadata={'exposure_controls': 'not synchronized'})
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = run_pipeline(Recorded(3), Path(tmp), ProcessingConfig(), RuntimeConfig())
+            rows = [json.loads(line) for line in (Path(tmp)/'frames.jsonl').read_text().splitlines()]
+            events = [json.loads(line) for line in (Path(tmp)/'publications.jsonl').read_text().splitlines()]
+            self.assertEqual(len(events), 3)
+            for row, event in zip(rows, events):
+                self.assertGreater(row['original_received_monotonic_ns'], row['replay_received_monotonic_ns'])
+                boundaries = list(row['boundaries'].values())
+                self.assertEqual(boundaries, sorted(boundaries))
+                self.assertLessEqual(row['replay_received_monotonic_ns'], boundaries[0])
+                self.assertLessEqual(boundaries[-1], event['published_monotonic_ns'])
+                self.assertEqual(row['sequence'], event['sequence'])
+                self.assertNotIn('published_monotonic_ns', row['boundaries'])
+                self.assertFalse(event['disk_durability'])
+            self.assertIsNone(summary['camera_to_output_latency'])
+            self.assertEqual(summary['stages']['host_residence']['count'], 3)
+            self.assertGreater(summary['stages']['host_residence']['mean_ms'], 0)
+            self.assertLess(summary['stages']['host_residence']['max_ms'], 1000)
+            self.assertEqual(len(summary['processed_frames_sha256']), 64)
 
 
 if __name__ == '__main__':
