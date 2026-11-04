@@ -56,3 +56,65 @@ ROI 转换、分阶段调度或原始帧元数据链路。逐帧 JSON 和汇总�
 python3 tools/video_replay/test_video_replay.py \
   --binary build/video-replay/dart_video_replay
 ```
+
+## Persistent simulation RGB interface
+
+The same build creates `dart_rgb_stream`. It runs the original
+`GreenLightDetector::process()` and shared `TargetEstimate` JSON v2 serializer
+with this directory's existing OpenCV RGB image shim. It does not open a camera
+or connect to a flight controller. The host-only profile below uses a 640×480,
+10 Hz simulated camera with **vertical** FOV 70° and square pixels
+(`fx=fy=342.7555216`, principal point `319.5,239.5`). Its 35° capture cone
+permits the simulation's initial ±15° heading offsets. These are declared
+rendering parameters, not measured OS04A10 intrinsics or hardware defaults.
+
+```bash
+build/video-replay/dart_rgb_stream \
+  --config tools/video_replay/simulation_green.conf
+python3 tests/test_rgb_stream.py --binary build/video-replay/dart_rgb_stream
+```
+
+Keep one child process, send one request, and read one response before sending
+the next. A request is a JSON object terminated by one LF, immediately followed
+by `height*stride` raw bytes, top row first, channel order RGB:
+
+```json
+{"protocol":"rm27-rgb-v1","stream_epoch":0,"source_sequence":0,"simulation_timestamp_us":0,"width":640,"height":480,"stride":1920}
+```
+
+All seven keys are required; unknown or duplicate keys are rejected. This
+bounded protocol subset uses unescaped ASCII keys and protocol strings. Numeric
+fields must be nonnegative decimal JSON integers. Sequence and simulation time
+are bounded by `2^53-1`, epoch by `2^31-1`; dimensions are 1–4096 and must match
+the selected config. Frames must be contiguous (`stride=width*3`), with payload
+at most 32 MiB and header at most 4096 bytes excluding LF. There is no implicit
+resize or color conversion. Within an epoch, sequence and simulation time must
+strictly increase; sequence gaps are counted. A greater epoch rebuilds detector
+and visual-motion state, allowing sequence/time to restart at zero. Reversed
+epochs, duplicate/reversed sequence/time, malformed/truncated requests and
+write failures terminate nonzero. Clean EOF between complete requests exits
+zero. No internal input/output queue or growing frame history is introduced;
+the transport retains one reusable input buffer plus the detector's existing
+bounded state. A caller owns its queue bounds, response deadline and process
+termination if its peer stops responding.
+
+Each response is one flushed JSON line on stdout. It preserves the original
+confirmed `pixel_measurement`, including its distinction from tentative
+candidates, predicted tracks and the Kalman posterior. The additive
+`rgb_stream` object echoes protocol/epoch/sequence/time/dimensions and reports
+`source_kind="simulation"`, `timestamp_source="simulation_time_us"`,
+`pixel_format="RGB3"`, per-frame sequence gaps, and host-monotonic receipt and
+processing boundaries in microseconds. `processing_ms` covers original
+detector processing and any configured visual motion, not pipe transfer or
+response serialization. The clock domains are separate; subtracting simulation
+time from a host timestamp is invalid. Existing `source_received_us` stays zero
+because that device field has no physical-camera receipt in this interface.
+
+NPU and target pose must be disabled. The original detector's existing armor
+diagnostics may still run, but this profile declares color `auto` and consumers
+use only the confirmed green image measurement. All outputs retain
+`safe_for_control=false`, `angles_valid=false`, `pose.valid=false`, unknown
+pixel covariance and `exposure_timestamp_valid=false`. A separate simulator
+consumer may interpret pixels using its declared camera geometry; this does
+not qualify the board or change the hardware fail-closed contract. stderr is
+reserved for errors; retain it with a bounded consumer log.

@@ -462,3 +462,212 @@ SDK 也默认忽略。新产生的测试输出应放入上述忽略目录，避�
 `.clangd` 含本机 SDK/工具链绝对路径，因此保持忽略；新电脑先生成
 `build/compile_commands.json`，再执行 `cp .clangd.example .clangd`，必要时添加该电脑的
 MaixCDK include 路径。
+
+
+## Shared real-camera test videos
+
+[Shared video catalog](data/shared_vision/README.md) provides four user-supplied
+real drone-camera MP4 fixtures, hashes, reported capture settings, decoding checks
+and replay instructions. `data/shared_vision/` is a relative link to the shared
+RM27 dataset, with one physical copy; videos are local data, not included in a
+standalone clone. Keep derived test outputs separate from these inputs. See the
+catalog for exposure-mapping and synchronized-IMU/timestamp limitations.
+
+2026-11-04 host regression: the original C++ `GreenLightDetector::process()`
+now ran on **all 45,462 frames**, native 1344×760, frame step 1. Earlier shared
+video evidence covered decode/preprocessing only. Source SHA-256 matched the
+catalog before and after each complete run. No detection/confirmation thresholds
+were tuned to these videos. The frozen diagnostic profile derives from
+`tools/video_replay/simulation_green.conf`, with native dimensions, nominal
+180 FPS, `capture.enabled=false`, and `fx=fy=1344` / principal point
+`671.5,379.5` as numerical normalization placeholders, not physical calibration.
+This profile changes tracker normalization as well as suppressing uncalibrated
+angles; it is not interchangeable with the simulation-camera calibration.
+
+| Clip | Processed frames | Fresh confirmed pixel observations | Predicted valid outputs | Longest interval without a fresh observation |
+| --- | ---: | ---: | ---: | ---: |
+| clip01 | 5,505 | 3,604 (65.47%) | 126 | 449 frames / 2.494 s |
+| clip02 | 17,987 | 11,866 (65.97%) | 375 | 1,815 frames / 10.083 s |
+| clip03 | 10,079 | 8,852 (87.83%) | 167 | 453 frames / 2.517 s |
+| clip04 | 11,891 | 8,716 (73.30%) | 341 | 1,646 frames / 9.144 s |
+
+Fresh counts require a valid, new, tracker-confirmed `pixel_measurement` with
+one selected candidate and a valid center. These percentages describe output
+availability, **not precision or recall**; a lamp can be absent or out of frame.
+PASS covers sequential complete replay, nominal-FPS timestamp ordering, fresh
+pixel metadata, unchanged inputs and false angle/pose/control flags. Quantitative
+recognition quality is BLOCKED by missing ground truth. Board NV21/NPU and
+physical-flight qualification are NOT_RUN. Timestamp meaning remains nominal
+frame/FPS, not exposure timing. Two independent clip processes ran concurrently;
+recorded detector-only P50/P95/P99 exclude decoding, conversion and JSON output
+and are not board performance measurements.
+
+Local evidence is `artifacts/shared-real-green-replay/`: `summary.json`,
+`run_identity.json` (HEAD `c81456a` plus dirty-source/configuration/binary hashes),
+per-clip exact commands and full JSONL, and `qualitative.png` with 12 explicitly
+selected source frames. The existing replay CLI is unchanged; see
+[RGB replay commands](tools/video_replay/README.md). Original files remain read-only.
+
+Qualitative inspection found visible green points on the central stand in
+clip01 frame 3160, clip03 frame 5535 and clip04 frame 8681, while each output was
+`LOST` with zero candidates and no fresh pixel observation. These are specific
+visible-miss examples, not labels for the whole surrounding gap. In contrast,
+clip02 frame 2112 faces the room side without the target stand visible; its
+missing output must not be counted as a demonstrated miss. The 12-frame contact
+sheet is diagnostic evidence, not a ground-truth accuracy evaluation.
+
+The historical Sim input-contract audit rejected all 45,462 original records;
+four decoded-frame probes also hit its simulation-source guard before dispatch.
+That audit generated no commands, and its evidence remains in Sim
+`artifacts/shared-real-command-admission/summary.json`.
+
+On 2026-11-04, Sim added an explicit file-only encoded-video diagnostic entry,
+`replay-heading-commands`, reusing these unchanged detector outputs and existing
+heading projection/rate limiting. All 45,462 rows passed direction, order,
+finite-angle, 30 deg/s rate and 0.3 s expiry/hold checks under declared numerical
+camera/attitude hypotheses; all four complete repeats produced identical command
+digests. There were 33,038 fresh confirmed pixels, 1,009 predictions not admitted
+as new observations and 7,799 missing/expired-reference holds. See the
+[Sim README](../../../../components/rm_uav_mujoco/README.md) and
+[offline heading summary](../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-commands/summary.json) for commands, source linkage
+and per-clip results. Original detector flags remain unchanged.
+The Sim regression was 110 affected tests passed, then 428 passed / 5 skipped
+for its full suite; these are Sim host results, not M3C board tests. The existing
+[implementation status](docs/IMPLEMENTATION_STATUS_V0.2.md) now records this milestone.
+
+The same frozen detector/command rows now have a local
+[video gallery](../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/index.html):
+[clip01](../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/clip01/tracking_commands.mp4),
+[clip02](../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/clip02/tracking_commands.mp4),
+[clip03](../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/clip03/tracking_commands.mp4),
+[clip04](../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/clip04/tracking_commands.mp4).
+All 45,462 source rows remain aligned; presentation samples every sixth frame at
+30 FPS, preserving nominal duration, for 7,578 display frames. The four H.264
+1280×800 outputs passed full decoding and SHA-256 checks; see the
+[visualization summary](../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/summary.json).
+Green marks current confirmed observations, amber retained unexpired references,
+and gray missing/expired-reference holds; cyan is target bearing under the stated
+hypotheses and pink is rate-limited yaw output. This presents existing file-only
+diagnostics, not measured aircraft response. No detector rerun, new flight or
+core-algorithm change was made for this visualization; no commit/push.
+
+This is **software diagnostic PASS under assumptions**: focal length 1344 px,
+zero distortion, forward level mount and fixed identity reference attitude are
+not physical calibration or recorded aircraft pose. Source remains encoded video
+with nominal FPS timestamps, `safe_for_control=false`. No PX4 transport, board or
+flight was run. Actual aircraft-command correctness is NOT_RUN without matched
+camera/mount calibration and synchronized attitude. Recorded-pixel outputs are
+never fed back as supposed measured aircraft attitude.
+
+### Sparse visual-quality references (2026-11-04)
+
+The first quality stage adds source-index sampling and evaluation tools without
+changing detector thresholds, tracker parameters or models. The local
+[review page](artifacts/shared-real-green-quality/index.html) contains **128 uniform
+native frames** (every 360 source frames) and **four separate diagnostic cases**.
+Each PNG was checked pixel-for-pixel against sequential decoding of its source;
+the [single summary](artifacts/shared-real-green-quality/summary.json) preserves
+input/configuration/code hashes, annotation hashes and repeated evaluation results.
+The four videos are previously seen regression data, not an independent test set.
+
+AI labels are approximate provisional references, placed by inspecting raw images
+without detector overlays or adjacent-frame interpolation. The page defaults to
+the unmarked original. Enable the optional reference mark, correct visibility,
+center and radius, then confirm each frame and **download each clip's JSONL before
+closing or reloading**. Edits otherwise exist only in page memory. Keep downloaded
+human-reviewed files alongside the original AI references; only explicitly
+confirmed rows become `human_reviewed`. Mixed review states are evaluated in
+separate groups. The user subsequently chose to skip manual review: human review is **NOT_RUN**,
+and no user annotation action is pending. AI references remain provisional. Formal
+quality evaluation is **BLOCKED by missing independent verified references**;
+algorithm acceptance is **NOT_RUN**.
+
+Provisional uniform-sample results (AI labels only):
+
+| Clip | Visible | Absent | Uncertain | Matching confirmed pixel | No candidates | Candidates, no confirmed pixel | Fresh output on absent |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| clip01 | 14 | 2 | 0 | 10 | 3 | 1 | 0 |
+| clip02 | 33 | 13 | 4 | 31 | 1 | 1 | 2 |
+| clip03 | 24 | 4 | 0 | 19 | 2 | 3 | 2 |
+| clip04 | 29 | 5 | 0 | 22 | 6 | 1 | 1 |
+| Total | 100 | 24 | 4 | 82 | 12 | 6 | 5 |
+
+No confirmed pixel fell outside the existing reference match scale in these
+samples. The 82 observed visible centers have median error 0.968 px and maximum
+8.987 px against approximate AI centers; this is not subpixel ground truth.
+Three of the six candidate-without-confirmation samples are frame zero, so the
+count alone does not establish a tracker failure. The diagnostic cases are
+separate: clip01/3160, clip03/5535 and clip04/8681 have visible lamps and zero
+candidates; clip02/2112 is absent without output.
+
+Review priorities are background confusion, visible frames without candidates,
+and posterior displacement. The five outputs on absent frames point to small
+green signs above the background doorway (clip02/16200,16560;
+clip03/1440,7920; clip04/4320). Separately, clip02/10440 has a 1.383 px confirmed
+pixel error but a 52.037 px nonpredicted posterior error. This establishes an
+output-position difference, not its cause; the median errors use different
+availability sets and should not be treated as a filter improvement score.
+Threshold, association, exposure and smoothing causes remain hypotheses.
+The tool/data checks and two complete evaluation repeats are PASS, with identical
+ordered result digest; all 45,462 rows also passed order/status auditing.
+
+Reproduce extraction into a new directory from this repository root, using a
+Python environment with OpenCV (tested with 4.6 and 5.0):
+
+```bash
+python3 tools/dataset/prepare_reference_frames.py \
+  --manifest data/shared_vision/real_camera_exposure/manifest.json \
+  --baseline artifacts/shared-real-green-replay \
+  --output artifacts/shared-real-green-quality-new
+```
+
+This verifies original video, manifest, frozen source/configuration/binary and
+detector-record identities, then sequentially decodes to EOF. It never uses
+candidate availability to select samples. Existing outputs are rejected; the
+default limit is 132 native PNGs and 512 MiB including metadata. Interrupted or
+over-budget preparation retains an explicit FAIL summary.
+
+For example, evaluate clip01's current AI references, or substitute a downloaded
+human-reviewed reference path. Use a new metrics filename for each evaluation:
+
+```bash
+python3 tools/evaluate_target_reference.py \
+  --reference artifacts/shared-real-green-quality/clip01/reference.jsonl \
+  --replay artifacts/shared-real-green-replay/clip01/detections.jsonl \
+  --kind green --observation-source pixel_measurement \
+  --width 1344 --height 760 --stream-audit --expected-frames 5505 --fps 180 \
+  --replay-sha256 eca31409650b7375f770c11c501f2de0936837e068831a2be5a309354794a2e6 \
+  --output artifacts/shared-real-green-quality/clip01/evaluation-new.json
+```
+
+`--reference-sha256` can pin a selected annotation version. Clip02–04 expected
+counts are 17,987 / 10,079 / 11,891; use their recorded JSONL hashes from the summary.
+`--observation-source green` compares nonpredicted tracker positions separately;
+the pixel mode also reports posterior error, including explicitly identified
+predictions, without counting predictions as fresh observations. Raw pixel
+distances accompany the unchanged reference match scale `max(4, radius)` pixels.
+Full-stream auditing reports ordering and output-availability intervals only;
+sparse labels cannot establish frame-by-frame tracking continuity.
+
+The original evaluator invocation without the new options retains its green and
+armor behavior. The affected 33 tool tests pass under both OpenCV versions:
+
+```bash
+python3 -m unittest tools/test_evaluate_target_reference.py \
+  tests/test_prepare_reference_frames.py -q
+```
+
+This stage does not qualify the NV21 board path, physical capture timing or flight
+behavior. The batch exposure multiset remains 1500/2500/2500/3000 μs, LCG 1×, with
+unknown per-file assignment. Independent scenes and matching physical calibration
+are still missing. Select a specific next algorithm change from the diagnostic cases and fix its
+comparison criteria first. Comparisons using these provisional references remain
+AI-reference regression results, not independent accuracy acceptance.
+
+## Shared M3C and MaixCAM2 board references
+
+[Shared board catalog](data/shared_m3c_board/README.md) provides the user-supplied
+M3C/MaixCAM2 schematics and 3D/mechanical files, with a SHA-256 manifest.
+Use `data/shared_m3c_board/raw/` from this checkout; all local aliases share one
+physical collection. Match the document to the actual board revision. Raw files
+are local references supplied separately from Git clones; see the catalog for paths.

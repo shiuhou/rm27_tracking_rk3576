@@ -1,6 +1,6 @@
 # v0.2 计划落实与验收状态
 
-更新日期：2026-09-09。下方矩阵保留9月1日60fps基线；新增180fps业务状态见文末及
+更新日期：2026-11-04（America/New_York）。下方矩阵保留9月1日60fps基线；180fps业务状态见后文及
 [业务验证报告](../reports/BUSINESS_FULL180_2026-09-08.md)。这里把“代码已实现”“工具链已实现”和“必须由真实数据/实机完成”
 分开记录。缺少模型或真值时保持 fail-closed，不用占位数值制造通过结果。
 
@@ -8,7 +8,69 @@
 [全视野 180 fps 绿灯识别更新方案](GREEN_DETECTION_PLAN_FULL180.md)。该方案指出现有
 5 个 NV21 候选轮询到单一 tentative tracker 无法保证 100 ms 捕获，并将下一项代码工作
 调整为全视野候选轨迹库、多尺度 proposal 和状态相关搜索调度；本页其余内容继续作为
-已经完成事项和证据边界记录。
+已经完成事项和证据边界记录。使用者随后选择略过人工复核，后续可沿用 AI 暂定参考做回归诊断，
+按具体错误层固定比较方法；不因此升级为独立准确率验收。本轮未实施这些算法修改。
+
+## 2026-11-04：稀疏参考标注与品质评估第一阶段
+
+工具与数据完整性 **PASS**；使用者明确选择略过人工复核，人工复核为 **NOT_RUN**，不再等待使用者标注。
+AI 参考仍为暂定；正式品质评估因缺独立已验证真值而 **BLOCKED**，算法验收 **NOT_RUN**。
+沿用原始四片及 45,462 行冻结辨识结果；23 个 source/config/binary 身份、manifest、原片和
+JSONL 哈希核对，未重跑 detector、改变参数、接入飞控或操作硬件。
+新增 `tools/dataset/prepare_reference_frames.py`；扩充既有 `tools/evaluate_target_reference.py`，
+保持默认 green/armor 评估行为。固定源帧每 360 帧抽样，128 张均匀样本加 4 张诊断案例，
+132 张原生 PNG 均与原片顺序解码逐像素一致。AI 查看无 detector 叠图的原图，近似中心／范围
+均为 `ai_provisional`；无相邻帧插值。覆核页可人工修正并下载 JSONL，未确认列不自动升级。
+
+均匀样本暂定为 **100 可见／24 不在画面／4 不确定**；可见样本中 82 个确认像素位置匹配、
+12 个无候选、6 个有候选但无确认、0 个确认位置不符。后者 6 张有 3 张在 frame 0，
+不能仅据此断言 tracker 故障。不在画面样本有 5 次新鲜确认输出，均对应背景门上方绿色小牌；
+该负样本判断仍是 AI 暂定参考，不代替独立真值。82 个确认中心相对近似 AI 中心误差中位 0.968 px、最大 8.987 px，
+沿用 `max(4, radius)` 匹配尺度，不是亚像素真值。
+四个诊断案例另表：clip01/3160、clip03/5535、clip04/8681 可见但零候选；clip02/2112 不在画面且无输出。
+
+位置输出层另有具体差异：clip02/10440 当帧确认像素误差 1.383 px，非预测 tracker 后验误差
+52.037 px；两者分开记录。背景误确认、可见无候选及后验偏移列为优先覆核问题，
+未将原因直接命名为阈值／关联／曝光／滤波问题。所有 45,462 行仅新增完整性、确认／预测和
+无观测区间统计；不能把整段无观测区间当漏检时间或推定逐帧追踪连续性。
+
+全部四片的两次完整稀疏评估结果一致，有序结果 SHA-256
+`1bb5deea35cbb706fa6dafc4486efcf86cf879c8df378eeae9147c40f5d0d0e6`。
+33 项相关工具测试在 OpenCV 4.6 和 5.0 均通过；原 6 项评估测试保持不变，
+与 HEAD 旧算法在 120 行合成数据上的数值差分一致。旧 clip13 对应 replay 不在本机，
+该真实旧模式复算为 NOT_RUN；参考 fixture 未改。
+产物集中于 `artifacts/shared-real-green-quality/`，仅 132 张原生 PNG、4 份参考 JSONL、
+样本清单、[覆核页](../artifacts/shared-real-green-quality/index.html)和
+[单份摘要](../artifacts/shared-real-green-quality/summary.json)，小于 512 MiB。
+命令与覆核步骤见 [README](../README.md#sparse-visual-quality-references-2026-11-04)。
+这四片是已看过的回归数据，仍缺人工覆核及独立场景；RGB 回放不等于板端 NV21 或实机验收。
+保留现有未提交工作，无 commit／push。
+
+## 2026-11-04：四段共享真机影片与离线航向验证
+
+原始 C++ 辨识／追踪已跑完四片共 **45,462 帧**，原片 SHA-256、影格顺序及名义时间检查 PASS。
+其中 33,038 次新鲜确认像素观测；输出可用率不是 precision／recall，人工真值仍缺失。
+三个已抽查到的可见漏识别案例仍保留，未因下游验证通过而改判。
+
+Sim 复用这些原始输出及现有航向算法，完成 **45,462 笔文件式航向诊断 PASS**；
+方向、30°/s 限速、0.3 秒过期保持及每片完整重跑一致性均通过。
+Sim 相关测试 110 passed，完整回归 428 passed、5 skipped；不是本仓库的板端测试结果。
+相机内参、前向安装及固定参考姿态均是明确的数值测试假设，`safe_for_control=false`。
+实际飞机指令正确性、PX4 接收及硬件飞行为 NOT_RUN，仍需匹配标定和同步姿态。
+这次未修改本仓库的 detector／tracker 核心或重定义旧的实机验收门槛。
+
+同日补充已有结果的[视频可视化](../../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/index.html)：
+[clip01](../../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/clip01/tracking_commands.mp4)、
+[clip02](../../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/clip02/tracking_commands.mp4)、
+[clip03](../../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/clip03/tracking_commands.mp4)、
+[clip04](../../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/clip04/tracking_commands.mp4)。
+四片 H.264／1280×800／30 FPS 均完整解码、哈希核对 PASS，
+保留完整名义时长，按每第六帧展示共 7,578 帧；[媒体摘要](../../../../../components/rm_uav_mujoco/artifacts/shared-real-heading-visualization/summary.json)保留来源与输出哈希。
+画面区分当帧确认、沿用未过期观测及过期保持，并同步显示目标方位与限速航向曲线。
+仅展示已有文件式诊断，不是飞机实测响应；未重跑辨识、执行新飞行或修改核心算法。
+
+每片统计、漏识别样本及证据入口见 [共享影片回归](../README.md#shared-real-camera-test-videos)；
+Sim README 保存执行命令和控制侧证据。本机 artifacts 不随 Git 分发；没有 commit／push。
 
 ## 落实矩阵
 

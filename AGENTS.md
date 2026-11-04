@@ -67,3 +67,25 @@ at `.agents/plans/plan_<task>_01.md` and put bounded diagnostic evidence under
 `.agents/runs/<task-id>/`; these directories are local and ignored. Preserve
 unrelated changes, do not reset the checkout, and update the existing status or
 handoff document instead of creating a new report for every iteration.
+
+
+## Shared real-camera test videos
+
+Read `data/shared_vision/README.md` and its linked manifest before using the
+shared real-camera MP4 fixtures. This local relative link points to the RM27
+integration workspace's `data/vision/` catalog; raw videos are not bundled in
+Git clones. Keep inputs unchanged and derived results in this repo's ignored
+artifacts. Encoded video alone is not synchronized Camera+IMU VIO or verified
+sensor/exposure timing evidence. If the link/data is absent, obtain or relink
+the shared dataset instead of inventing missing provenance.
+
+## Shared M3C and MaixCAM2 board references
+
+For M3C/MaixCAM2 carrier, wiring or mechanical reference work, read
+`data/shared_m3c_board/README.md` and `data/shared_m3c_board/manifest.json`;
+source files are under `data/shared_m3c_board/raw/`. This relative local link
+resolves to the integration repo's single hardware reference collection. Match
+378C/379C/3.0 documents to the actual board; filenames do not verify installed
+revision, IMU wiring or camera synchronization. Keep sources unchanged and
+derivatives in this repo's artifacts. Standalone clones need the payloads and a
+new local link; report missing data.
