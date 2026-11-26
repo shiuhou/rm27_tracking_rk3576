@@ -27,15 +27,16 @@ provenance and separately recorded verification. No AXMODEL backend is implied.
 
 ## Start here for vision teammates
 
-The current RK3576 review source is on `codex/vision-team-review`:
+The current RK3576 source is on `main`:
 
 ```bash
-git clone --branch codex/vision-team-review https://github.com/shiuhou/rm27_tracking_rk3576.git
+git clone --branch main https://github.com/shiuhou/rm27_tracking_rk3576.git
 ```
 
-Create a feature branch from this review branch for changes, and target
-`codex/vision-team-review` when opening a pull request. Onboard and the pinned
-combined checkout are in `shiuhou/rm27_drones` on the same review branch.
+Create a feature branch from `main` for changes, and target `main` when opening
+a pull request. Onboard and the pinned combined checkout are in
+`shiuhou/rm27_drones` on `main`. The original `codex/vision-team-review`
+branch remains the source-review snapshot described below.
 
 This component owns camera acquisition, payload decoding, preprocessing,
 recording/replay, calibration tools, and the portable green-marker detector and
@@ -784,20 +785,23 @@ adapter. No software license has been selected for this repository.
 
 This is an independently versioned repository with `origin` configured as
 `https://github.com/shiuhou/rm27_tracking_rk3576.git` at the owner's request.
-The review branch `codex/vision-team-review` includes the current Linux detector,
+The `main` branch includes the current Linux detector,
 tracker, camera integration and diagnostics prepared from `integrate/onboard-vision`.
-It is a source-review version; hardware qualification retains its existing scope.
+These sources were first published for review at
+`a373bde444c5d5844928be689ef7db38ac84bf36`; `codex/vision-team-review` preserves
+that snapshot. Promotion to `main` updates publication guidance; hardware
+qualification retains its existing scope.
 Generated media, benchmark logs, virtual environments, build outputs and local
 engineering plans/run records remain ignored.
 
 S1/S2 baseline commit is `e8a9ac85522c9ed70cb68722c6fec8459be3e653`.
 S3/S3.5 extend it with reproducible recordings, calibration and ARM64 preparation.
-Read-only remote verification found published `main` at
+Before this promotion, `main` was at
 `1e59b3631e7cdf73ddf91c10c0e25cddcb5799b4` (S3/S3.5), without the current
 `detector/` tree. Published historical branch `m3c_tracking` is at
 `85a9182a0d9f6ab5dd20c7556a6dccd095deec8d` and contains earlier green-detector
 and host-replay source. The current RK3576 port and diagnostic interface are now
-in `codex/vision-team-review`; `main` is the earlier acquisition baseline.
+on `main`.
 The local development branch name `integrate/onboard-vision` is not the team entry.
 Use `git status`, `git log -1` and `git ls-remote --heads origin` to recheck this
 snapshot before relying on a clone. No credentials are stored in this repository.
