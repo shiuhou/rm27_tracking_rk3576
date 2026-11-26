@@ -105,6 +105,8 @@ class BufferedSource:
         self.acquisition = Latencies()
         self.validation = TimestampValidator()
         self.first_received = self.last_received = None
+        self.last_epoch = None
+        self.discarded_on_epoch_change = 0
         self.thread = Thread(target=self._produce, name="rm27-acquisition", daemon=True)
 
     def _produce(self):
@@ -135,6 +137,10 @@ class BufferedSource:
                     if self.closed:
                         self.discarded_on_stop += 1
                         break
+                    if self.policy == "latest" and self.last_epoch != frame.stream_id:
+                        self.discarded_on_epoch_change += len(self.queue)
+                        self.queue.clear()
+                    self.last_epoch = frame.stream_id
                     if len(self.queue) == self.capacity:
                         self.queue.popleft()
                         self.dropped += 1
@@ -210,6 +216,7 @@ class BufferedSource:
             return {"captured": self.captured, "queue_drops": self.dropped,
                     "queue_capacity": self.capacity, "queue_high_water": self.high_water,
                     "discarded_on_stop": self.discarded_on_stop,
+                    "discarded_on_epoch_change": self.discarded_on_epoch_change,
                     "streams": self.validation.streams,
                     "application_sequence_gaps": self.validation.sequence_gaps,
                     "acquisition_fps": (self.captured - 1) * 1e9 / span if span > 0 else None,
@@ -231,8 +238,9 @@ def generic_statistics(image):
 
 
 def run_pipeline(source, output, processing: ProcessingConfig, runtime: RuntimeConfig,
-                 processor: Callable = generic_statistics, metadata=None):
-    """All replay/live CLI and benchmark paths share acquisition and processing."""
+                 processor: Callable = generic_statistics, metadata=None, *,
+                 frame_processor=None, stop_requested=None, borrow_input=False):
+    """Run shared acquisition. With borrow_input, callbacks must not mutate identity frames."""
     output = Path(output)
     # The caller creates a fresh run directory (and optional input manifest).
     output.mkdir(parents=True, exist_ok=True)
@@ -277,6 +285,9 @@ def run_pipeline(source, output, processing: ProcessingConfig, runtime: RuntimeC
         with (output / 'frames.jsonl').open('x') as log, (output / 'resources.jsonl').open('x') as resources, \
                 (output / 'publications.jsonl').open('x') as publications:
             while processing.max_frames is None or count < processing.max_frames:
+                if stop_requested is not None and stop_requested():
+                    summary["stop_reason"] = "requested"
+                    break
                 if runtime.duration_s is not None and (perf_counter_ns() - started) / 1e9 >= runtime.duration_s:
                     summary['stop_reason'] = 'duration'
                     break
@@ -293,9 +304,10 @@ def run_pipeline(source, output, processing: ProcessingConfig, runtime: RuntimeC
                 stages['queue_wait'].add(arrived - packet.queued_ns)
                 consumer_validation.observe(frame)
                 validated = monotonic_ns()
-                image = preprocess(frame.image, processing)
+                image = preprocess(frame.image, processing, borrow_input=borrow_input)
                 preprocessed = monotonic_ns()
-                result = processor(image)
+                result = (processor(image) if frame_processor is None
+                          else frame_processor(frame, image, buffered.summary))
                 processed = monotonic_ns()
                 stages['validation'].add(validated - arrived)
                 stages['preprocessing'].add(preprocessed - validated)

@@ -1,11 +1,200 @@
-# rm27_tracking
+# rm27_tracking_rk3576
 
 Lightweight general-purpose vision acquisition, preprocessing and measurement
-for future RK3576 Linux research. The shared runner supports original-payload
+for RM27’s active RK3576 Linux platform. The shared runner supports original-payload
 recording/replay, calibration estimates and real-input benchmarks. S3.5 adds
 tested one-memory-plane V4L2 multiplanar capture, calibration loading and ARM64
-userspace verification. No target engagement, armor selection,
-collision guidance, attack-related reacquisition or actuator output is included.
+userspace verification. Mission-specific plate recognition and reacquisition,
+contact guidance and actuator outputs belong to the separate mission layer.
+
+Repository: `shiuhou/rm27_tracking_rk3576`; parent checkout path:
+`components/rm27_tracking_rk3576/`. The Python distribution remains
+`rm27-tracking`, imports remain `rm27_tracking`, and the four `rm27-*` commands
+retain their existing names so installed callers continue to work.
+
+As of 2026-11-11, RK3576 is the sole active RM27 onboard platform.
+M3C is retired from development and deployment; its source, data, and validation
+records remain historical references. Platform acceptance requires RK3576 evidence.
+The former M3C reference in `rm27/perception/vision/rm27_tracking_m3c/` retains
+its upstream and historical provenance. Do not reuse its calibration or
+performance measurements as RK3576 qualification.
+
+The user additionally classifies MaixCAM2/MaixCDK and AXMODEL platform
+source, models, commands and later upstream updates as historical material
+(2026-11-23), not a current development or waiting dependency. The portable
+Linux detector already owned here remains current, with its historical
+provenance and separately recorded verification. No AXMODEL backend is implied.
+
+## Start here for vision teammates
+
+The current RK3576 review source is on `codex/vision-team-review`:
+
+```bash
+git clone --branch codex/vision-team-review https://github.com/shiuhou/rm27_tracking_rk3576.git
+```
+
+Create a feature branch from this review branch for changes, and target
+`codex/vision-team-review` when opening a pull request. Onboard and the pinned
+combined checkout are in `shiuhou/rm27_drones` on the same review branch.
+
+This component owns camera acquisition, payload decoding, preprocessing,
+recording/replay, calibration tools, and the portable green-marker detector and
+temporal tracker. In the parent workspace, `onboard/` owns process lifecycle,
+configuration and the RGB adapter that connects these interfaces. PX4 transport,
+flight control, mission policy and contact/recovery decisions belong to their
+respective integration layers. A pixel observation is not a pose or flight command.
+
+Read this README's build, replay and limitation sections first, then follow the
+source map below. The component's requirements, ownership and milestones are in
+[SPEC](.agents/docs/SPEC.md), [DESIGN](.agents/docs/DESIGN.md) and
+[ROADMAP](.agents/docs/ROADMAP.md). These files describe the component contract;
+local parent recordings and reports provide evidence for particular runs.
+
+| Question | Start with |
+| --- | --- |
+| How does a frame move through acquisition and processing? | `src/rm27_tracking/pipeline.py`, `camera.py`, `formats.py`, `runtime.py` |
+| How are original payloads and their timestamps preserved? | `src/rm27_tracking/recording.py`, `replay.py`; `tests/test_recording.py` |
+| Where are candidates generated and accepted/rejected? | `detector/main/include/dart/green_detector.hpp`, `detector/main/src/green_detector.cpp` |
+| Where are temporal prediction, association and confirmation implemented? | `detector/main/src/green_detector_core.cpp`; `detector/tests/test_center_kalman.cpp`, `test_predictive_center.cpp` |
+| What is serialized for integration? | `detector/main/src/target_fusion.cpp`, `target_json.cpp`, `detector/tools/video_replay/rgb_stream.cpp` |
+| How do we reproduce an offline comparison? | `detector/tools/video_replay/compare_recording.py`, `detector/tests/test_rgb_stream.py`, `test_compare_recording.py` |
+
+A standalone source snapshot needs `src/`, `configs/`, `scripts/`, `tests/`,
+`detector/main/`, `detector/config/`, `detector/tests/`,
+`detector/tools/video_replay/`, `pyproject.toml`, this README, `AGENTS.md`,
+`.agents/docs/` and `.gitignore`. Build directories, virtual environments,
+generated results, raw recordings and the parent workspace are not needed for
+the synthetic host tests below. Shared real-camera fixtures are local payloads,
+not bundled clone inputs; obtain their catalog and original files before trying
+to reproduce the real-input results. Review the provenance and publication
+sections before distributing imported source.
+
+## Linux green-marker detector and tracker
+
+The C++ implementation and RGB adapters live in [`detector/`](detector/).
+Onboard assembles these with the Python camera and recording interfaces using
+its existing RGB pipe. Build from this component's root with CMake >=3.13, a
+C++17 compiler and OpenCV 4 development libraries (`core`, `imgproc`, `videoio`).
+The Python `opencv-python` wheel supplies `cv2`, not the C++ headers and CMake
+package. On Debian/Ubuntu the native dependencies are commonly supplied by
+`build-essential`, `cmake` and `libopencv-dev`; use the selected distribution's
+packages. Install the Python dependencies from the next section before running
+the Python checks. Use the same CMake entry point on ARM64, with native or matched
+cross-toolchain dependencies; a host build does not qualify RK3576 execution.
+
+```bash
+cmake -S detector/tools/video_replay -B detector/build/video-replay -DCMAKE_BUILD_TYPE=Release
+cmake --build detector/build/video-replay -j2
+cmake -S detector/tests -B detector/build/tests
+cmake --build detector/build/tests -j2
+ctest --test-dir detector/build/tests --output-on-failure
+python detector/tests/test_rgb_stream.py
+PYTHONPATH=src python detector/tests/test_compare_recording.py
+```
+
+Keep assertions enabled in the native test build (the command above uses the
+default build type). The optional historical `AX_SDK_INCLUDE` test requires
+Maix/AX-specific sources outside this extracted Linux tree and is not part of
+the supported RK3576 build. Leave that option unset; no MaixCDK, AX SDK,
+AXMODEL file, NPU runtime or physical camera is required for these host checks.
+
+For a bounded, encoded-video detector replay, create a new output directory and
+pass the configuration explicitly from the component root:
+
+```bash
+mkdir -p artifacts/detector-replay-001
+detector/build/video-replay/dart_video_replay \
+  --input /absolute/path/to/video.mp4 --config detector/config/green_detector.conf \
+  --native-resolution --max-frames 120 --no-overlay-video \
+  --jsonl artifacts/detector-replay-001/targets.jsonl
+```
+
+This runs the classical detector; Python replay uses a generic channel-statistics
+processor by default. Match the configuration to the actual input before evaluating detection;
+`simulation_green.conf` is a generated-fixture profile, not a real-camera tuning
+result. Encoded-video replay does not recover sensor/exposure timing.
+
+`dart_rgb_stream` accepts a bounded JSON header followed by contiguous RGB3 bytes.
+The `rm27-rgb-v1` protocol carries simulation time; `rm27-camera-rgb-v1` carries
+host camera receipt time. Dimensions must match the configuration, sequence and
+time increase within an epoch, and a new epoch resets the detector. The adapter
+disables NPU and pose output and emits `safe_for_control=false`, invalid pose and
+invalid angles. Camera receipt time is not exposure time. Its generated-image
+protocol tests exercise the compiled binary, including default/diagnostic parity.
+
+The portable build baseline was imported byte-for-byte from `onboard-b5f24de264ad6e8980579e2e`
+(`source-inputs.tar.gz`, SHA-256 `7f35da0701ea842cd60aa810400edc66aa75d65031210152f14124c76d376534`).
+The detector files originate from `blademaster679/maixcam2_dart_vision` through the historical
+`m3c_tracking` checkout. The simulation profile and native regression inputs come
+from `85a9182a0d9f6ab5dd20c7556a6dccd095deec8d`. The historical checkout and P1
+archive retain the original source paths for reproduction. The archive hash is
+inherited import evidence; it was not rechecked during the teammate delivery
+build. The historical local checkout is
+`rm27/perception/vision/rm27_tracking_m3c/` in the parent workspace (formerly
+`maixcam2_dart_vision`); its origin is
+`https://github.com/blademaster679/maixcam2_dart_vision.git`.
+
+The inspected upstream `ac83e8c224214bc99483f9617450e110c5c16022` and historical
+`85a9182a0d9f6ab5dd20c7556a6dccd095deec8d` trees have no identified
+LICENSE/COPYING/NOTICE file or explicit grant in the inspected source/readme
+headers. Redistribution terms remain unresolved; a public repository alone does
+not identify a license. No replacement license is assigned here. Preserve the
+origin, revisions and file provenance when reviewing terms for distribution.
+
+### Offline stage diagnostics
+
+`dart_rgb_stream --config CONFIG --diagnostics` adds a versioned
+`stage_diagnostics` object to each reply. Omitting the flag retains the default
+output schema. It observes the existing computation without changing detection
+thresholds or decisions. Search rectangles and sample centers use source pixels.
+Counters distinguish sparse proposals, exact checks, NMS, appearance rejection,
+retained candidates, score/cone gating and tracker confirmation. Selected candidates
+can still fail tracker association; selection alone is not a fresh measurement.
+
+At most 128 exact-passed peak outcomes are sampled per frame. `reason_counts`
+counts every visited outcome, `samples_dropped` reports sample truncation, and
+`peaks_unvisited` reports exact-passed peaks skipped by the existing retained-peak
+or candidate budgets. Sparse proposal budgets have separate before/after counters.
+Samples describe only normalized multiscale peaks; legacy LAB candidates have
+no peak samples. Scheduler coast clears per-frame diagnostics even when internal
+candidate caches remain populated. No annotated boxes enter detection.
+
+The reusable offline comparison runs baseline, current default and current
+diagnostic binaries once each. It hashes inputs before replay, preserves original
+capture receipt timestamps, checks full non-timing output parity, and reports
+original kernel gaps separately from replay drops. It makes no speed claim.
+
+```bash
+PYTHONPATH=src python detector/tools/video_replay/compare_recording.py \
+  --baseline /path/to/baseline/dart_rgb_stream \
+  --candidate /path/to/current/dart_rgb_stream --config /path/to/capture.conf \
+  --recording /path/to/recording --out artifacts/stage-comparison \
+  --annotations /path/to/reviewed.csv \
+  --supplemental-frame 1261 --supplemental-frame 1262 --supplemental-frame 1263
+python detector/tests/test_rgb_stream.py --binary /path/to/current/dart_rgb_stream
+python detector/tests/test_compare_recording.py
+```
+
+Annotations are optional human XYWH boxes, evaluated after replay with fresh
+confirmed raw pixel centers inside the box. Supplemental detector-selected frames
+are reported separately. Missing or truncated samples cannot establish a local
+rejection cause. Search rectangle coverage alone does not prove cone-mask coverage.
+Recordings and reviewed labels are local evidence, not bundled test fixtures.
+
+Verified on 2026-11-23 against the unchanged RK3576 USB 1280×720 MJPG capture
+`moving-capture-cbobEf`: baseline/default/diagnostics each replayed all 1,281 frames
+with identical RGB and non-timing measurement outputs, 491 original source gaps
+and zero new replay drops. No diagnostic samples were truncated. All 16 uniform
+visible human boxes still lacked a fresh confirmed observation; their 1,560
+exact-passed peak centers were appearance-rejected (1,388 color fraction,
+74 component chroma, 69 radial contrast, 29 component boundary).
+The three detector-selected supplemental positives all matched, with raw-center
+error 0.981–1.725 px from box center; they do not change uniform recall.
+This reproduces the earlier temporary candidate trace through the reusable
+interface. It establishes the software rejection stage, not a physical exposure,
+lighting or white-balance cause. No thresholds changed, and the new binary has
+not been deployed or timed on RK3576. The parent workspace retains the detailed
+comparison at `components/rm27_tracking_rk3576/.agents/runs/tracking-stage-diagnostics/replay/comparison.json`.
 
 ## Install, build and test
 
@@ -62,10 +251,12 @@ requires a multiplanar/ISP path that the current adapter cannot support.
 - `recording.py` owns the versioned raw-payload format; `calibrate.py` provides
   `rm27-calibrate` using OpenCV checkerboard detection and pinhole calibration.
 
-`preprocess()` returns pixels independent of the input. An OpenCV transformation
-already owns its output, so S2 removes the redundant final copy in transformed
-paths. File decoder outputs are owned already; the extra S1 decoder copy is also
-removed. MMAP data is converted/copied before QBUF returns a buffer to the driver.
+`preprocess()` returns pixels independent of the input by default. An OpenCV
+transformation already owns its output, so transformed paths avoid a redundant
+final copy. An explicit `borrow_input=True` opts into a read-only view for an
+identity operation; the caller must retain and avoid mutating the backing image
+for the view's lifetime. File decoder outputs are already owned. MMAP data is
+converted/copied before QBUF returns a buffer to the driver.
 Zero-copy hardware/DMABUF/RGA integration is outside this baseline.
 
 Application queue capacity is configurable (1–64, default 2). `block` preserves
@@ -443,16 +634,53 @@ do not replace its ISP/codecs with a pip distribution without checking the BSP.
 ## RK3576 camera evidence and first boot
 
 The forward camera sensor is **OS04A10**, confirmed by the user with Sipeed's
-camera page. The downward camera is undecided. The RK3576 BTB board/carrier
-manufacturer, revision, pinout and BSP are awaiting the user's later information.
-No physical `/dev/video*` or media node is available on this host.
+camera page. The downward camera is undecided. The parent repository's supplied
+`RK3576/` bundle identifies **Beijing HZHY / 北京合众恒跃**, HZ-CORE-RK3576 and
+HZ-EVM-RK3576. Following the parent's `docs/REAL_HARDWARE.md` DDR5-only reference
+selection, use `01_硬件手册/硬件手册_新版（LPDDR5_CV00)/` for board-specific work:
+**LPDDR5 CV00 core / MV12 carrier**. This selects the documentation; the purchased
+core revision, carrier and installed BSP still need confirmation. No physical
+`/dev/video*` or media node is available on this host. Local source paths below
+are relative to that `RK3576/` bundle.
+
+The bundle's `01_硬件手册/README (用户设计底板前先看此说明）.txt`
+(dated 2026-01-27; SHA256
+`90192e5bbb9984d15c92aee812dbb5c319c1c9e7a537596361d5421b89c7e26e`)
+maps **LPDDR4 CV02 → MV01** and **LPDDR5 CV00 → MV12**. It explicitly warns
+that their connector pin ordering differs and the evaluation boards are not
+interchangeable. Do not substitute LPDDR4 pin tables, schematics or specifications
+for the selected DDR5 references. Check the actual core/carrier markings before
+applying a pin table; RAM/storage capacity or the same BTB connector shape does
+not identify the revision. Keep vendor files read-only; this independent package
+does not redistribute the bundle. Standalone clones need these references
+separately before board-specific configuration.
+
+`02_镜像及源码/01_HZ-EVM-RK3576_LINUX_SDK/README.md` contains only an instruction
+to obtain materials through the vendor's business/FAE contact. No SDK, rootfs
+image, kernel source/config, DTS/DTB or target sysroot is present in the supplied
+bundle. The Linux environment guide V1.0, pp.45–47, recommends an Ubuntu 20.04
+**build host**, but includes Linux 5.10/4.19 and RK3588 toolchain examples; those
+examples do not establish the RK3576 target kernel, OS or ABI. The native Debian/
+Ubuntu installation commands above remain conditional on the actual rootfs and
+Python/OpenCV versions, rather than a verified HZHY image recipe.
 
 | Primary evidence | What it establishes / remaining boundary |
 | --- | --- |
+| Local HZHY `01_硬件手册/硬件手册_新版（LPDDR5_CV00)/01_产品规格书/HZ-EVM-RK3576-规格书V1.1.pdf`, pp.9–12; MV12 schematic, pp.11–12 | Reference EVM has three four-lane camera connectors and camera power/clock/reset/I2C-switch circuitry. This is not an OS04A10 flex/adapter wiring definition. |
+| Local `03_文档教程/1、开发板使用手册/HZ-EVM-RK3576-测试手册V1.1.0(1).pdf`, pp.21–23 | Vendor camera examples use IMX415 (up to 4K30) and GC05A2; J13/J14/J15 map to `rkisp_mainpath` examples `/dev/video33`, `/dev/video42`, `/dev/video51`. A GStreamer preview requests NV12 1920×1080 at 30 FPS. These example nodes/modes are not stable device identities or OS04A10 support evidence. |
 | Sipeed camera comparison [1] | OS04A10 is a rolling-shutter sensor, listed at 2688×1520 with 2.9 µm pixels. Sipeed's advertised modes/lens apply to its module/MaixCAM integration; they do not qualify the purchased lens or RK3576 connection. |
 | Rockchip RK3576 product page [2] | Linux SDK, MIPI CSI and ISP exist at SoC level. Carrier lane wiring, connectors and supported camera modes still require vendor files. |
 | Rockchip kernel `77168c8d…`, `drivers/media/i2c/os04a10.c` [3] | A driver exists with `ovti,os04a10`, endpoint-selected two/four-lane modes, RAW10, 24 MHz xvclk, supply/reset resources and module/lens metadata. This is reference implementation evidence, not proof that the selected BSP includes it or that a module is electrically compatible. |
 | Same kernel, ISP `capture.c` and `capture_v32.c` [3] | The ISP exposes VIDEO_CAPTURE_MPLANE; contiguous NV12 uses one memory plane and NV12M uses two. This justifies the tested one-memory-plane adapter. The actual board's node, stride and format remain unverified. |
+
+Within the selected references, the LPDDR5 core specification V1.0, p.11, says
+2+2-lane splitting is temporarily unsupported, while the hardware
+design guide V1.0, p.42, describes it at SoC level. Do not infer an operational
+split-lane or dual-camera mode from these mixed references. The bundled ISP
+guides/link index cover other SoCs and do not establish an RK3576-specific ISP
+revision or matching OS04A10 IQ package. The vendor's GStreamer example also
+does not verify Python OpenCV's GStreamer backend. No software format/backend
+change is justified until the selected BSP's actual capabilities are available.
 
 The pinned reference kernel is not a required BSP version. Obtain the vendor's
 matching kernel/config, carrier schematic/pinout, sensor driver/device tree and
@@ -463,10 +691,13 @@ register values and driver timestamp flags alone do not establish physical
 exposure timing, rolling-shutter readout or cross-camera synchronization.
 
 After the vendor media graph is configured and native replay tests pass, collect
-read-only evidence from the identified nodes (replace the examples with the actual
-nodes; repeat `--device` for the eventual second camera):
+read-only evidence from the identified nodes. First list devices, then replace
+the example nodes with the matching `rkisp_mainpath` and media graph; do not
+assume `/dev/video0` or blindly use the vendor's `/dev/video33` example. Repeat
+`--device` for the eventual second camera:
 
 ```bash
+v4l2-ctl --list-devices
 python scripts/check_platform.py --device /dev/video0 --media /dev/media0 --out artifacts/board-probe-001
 # If exposure controls live on an identified sensor subdevice:
 v4l2-ctl -d /dev/v4l-subdev0 --list-ctrls-menus
@@ -512,10 +743,16 @@ pipeline remains independent of RKNN, and there are no invented NPU measurements
 [2]: https://www.rock-chips.com/a/en/products/RK35_Series/2024/1212/2033.html
 [3]: https://github.com/rockchip-linux/kernel/tree/77168c8d5ab82399f65a80e9f807b50ba37cf483
 
-## Existing code review and reuse decision
+## Historical S1/S2 code review and reuse decision
 
-Inspected parent `rm27_drones` and clean third-party submodule
-`rm27/perception/vision/maixcam2_dart_vision` at
+The table below records the original Python-only S1/S2 decision. The later Linux
+detector import described above supersedes its no-extraction decision for the
+detector, tracker, compatibility shim and RGB replay sources; the table is not a
+current source inventory.
+
+That review inspected parent `rm27_drones` and the third-party submodule then at
+`rm27/perception/vision/maixcam2_dart_vision` (now the historical
+`rm27/perception/vision/rm27_tracking_m3c`) at
 `ac83e8c224214bc99483f9617450e110c5c16022`. Its origin remains
 `https://github.com/blademaster679/maixcam2_dart_vision.git`.
 Paths below are relative to that third-party repository unless noted.
@@ -535,56 +772,66 @@ Paths below are relative to that third-party repository unless noted.
 | Parent `rm27/perception/vision/localization/analyze_video.py` | Uses OpenCV, NumPy, hashes and offline diagnostic outputs. Reuse those underlying libraries; its VSL qualification schema and external-tool workflow stay with localization. |
 | Existing target JSON/log evaluators | Target-specific schemas are excluded. Small JSONL frame/measurement records use the standard library. |
 
-No third-party source or historical artifacts were copied, moved or deleted.
-No top-level license was found in the inspected third-party checkout; any future
-source extraction needs provenance/license review. This baseline reuses the
-existing OpenCV/NumPy dependencies rather than duplicating image algorithms.
+At that S1/S2 stage, no third-party source or historical artifacts were copied,
+moved or deleted. No top-level license was found in the inspected third-party
+checkout; later extraction retains the provenance review above. That baseline
+reused the existing OpenCV/NumPy dependencies.
 No reusable source package could be imported independently without coupling to
 vendor or localization code; the new code is the small acquisition/metadata/CLI
 adapter. No software license has been selected for this repository.
 
 ## Parent integration and publication state
 
-This is an independently versioned repository on `main`, with `origin` configured
-as `https://github.com/shiuhou/rm27_tracking.git` at the owner's request.
-The initial commit contains the S1/S2 source, configurations, tests and build
-instructions. Generated media, benchmark logs, virtual environments, build
-outputs and local engineering plans/run records remain ignored.
+This is an independently versioned repository with `origin` configured as
+`https://github.com/shiuhou/rm27_tracking_rk3576.git` at the owner's request.
+The review branch `codex/vision-team-review` includes the current Linux detector,
+tracker, camera integration and diagnostics prepared from `integrate/onboard-vision`.
+It is a source-review version; hardware qualification retains its existing scope.
+Generated media, benchmark logs, virtual environments, build outputs and local
+engineering plans/run records remain ignored.
 
 S1/S2 baseline commit is `e8a9ac85522c9ed70cb68722c6fec8459be3e653`.
 S3/S3.5 extend it with reproducible recordings, calibration and ARM64 preparation.
-Use `git log -1` and `git ls-remote --heads origin main` to check publication state.
-No credentials are stored in this repository.
+Read-only remote verification found published `main` at
+`1e59b3631e7cdf73ddf91c10c0e25cddcb5799b4` (S3/S3.5), without the current
+`detector/` tree. Published historical branch `m3c_tracking` is at
+`85a9182a0d9f6ab5dd20c7556a6dccd095deec8d` and contains earlier green-detector
+and host-replay source. The current RK3576 port and diagnostic interface are now
+in `codex/vision-team-review`; `main` is the earlier acquisition baseline.
+The local development branch name `integrate/onboard-vision` is not the team entry.
+Use `git status`, `git log -1` and `git ls-remote --heads origin` to recheck this
+snapshot before relying on a clone. No credentials are stored in this repository.
 
-The parent working `.gitmodules` contains an active URL registration for
-`components/rm27_tracking`, but its index has **no mode-160000 gitlink** at this
-path. This pre-existing parent state was left untouched. A usable submodule
-needs a published child commit and a parent gitlink. Publishing this child alone
-does not complete parent integration.
+The component was formerly named `rm27_tracking`. Its existing child history and
+published `1e59b3631e7cdf73ddf91c10c0e25cddcb5799b4` revision are preserved.
+The parent's `.gitmodules` registration and mode-160000 gitlink determine which
+path and revision recursive clones receive. Check those separately from the
+child repository's working tree. Renaming the GitHub repository alone does not
+publish local file changes.
 
-For an explicitly authorized child release, synchronization commands are below
-(run from this component, review the staged diff, use the owner's identity only
-for the commit, and authenticate as `shiuhou` through the existing credential
-manager/SSH setup; never embed credentials in the URL):
-
-```bash
-git diff --check
-git add -- README.md pyproject.toml configs scripts src tests
-git diff --cached --stat
-git -c user.name=shiuhou -c user.email=uhshi371@connect.hkust-gz.edu.cn commit -m "Prepare reproducible camera data and ARM64 validation"
-git push origin HEAD:main
-```
-
-Parent synchronization needs separate authorization: stage the child gitlink
-with `git -C ../.. add -- components/rm27_tracking` and selectively stage only
-the tracking registration with `git -C ../.. add -p -- .gitmodules`. Review the
-parent staged diff and commit it separately, preserving unrelated changes. Verify
-a fresh recursive clone after both commits are published.
-`git submodule absorbgitdirs components/rm27_tracking` may then normalize
-Git-directory storage when run from the parent. This package builds and runs
-without the parent.
+Commit, push and parent gitlink publication each require explicit authorization.
+The imported source terms remain unidentified; the review preserves their origin
+and notices and does not assign a replacement license. Keep the full intended
+source inventory and verify changes from a clean clone. Parent registration and
+gitlink changes are a separate publication step. This package builds and runs
+without the parent; a local source bundle does not update GitHub or its gitlink.
 
 ## Validation and remaining hardware requirements
+
+Teammate delivery preparation (2026-11-26) copied the current source into a clean
+directory without the parent workspace, build outputs or raw datasets. On Linux
+x86_64 with Python 3.12.3, NumPy 2.5.1, Python OpenCV 5.0.0, native OpenCV 4.6.0,
+G++ 13.3.0 and CMake 3.28.3: **62 Python tests, 13 native CTest tests, 9 compiled
+RGB protocol tests and 9 comparison-tool tests PASS**. Both `dart_video_replay`
+and `dart_rgb_stream` build successfully. A generated 8-frame MP4 replay capped
+at 5 frames produces exactly 5 JSONL rows using the documented native-resolution
+command. These checks use generated inputs and preserve detector thresholds and
+output gates; they do not rerun the inherited
+1,281-frame real recording, measure detection accuracy or establish RK3576 speed.
+The comparison tool's SHA-256 reader also avoids the Python-3.11-only
+`hashlib.file_digest` API so it matches the declared Python >=3.10 floor. Python
+3.10 execution itself was not available in this host verification; empty,
+3-byte and 2,097,408-byte files retain their SHA-256 with that newer API removed.
 
 S1's five tests passed before edits. S2 preserves its image/video ordering,
 preprocessing, failure reporting and CLI through the common runner; its obsolete
@@ -632,3 +879,28 @@ BSP behavior. Useful upstream references:
 - Linux MMAP streaming: https://docs.kernel.org/userspace-api/media/v4l/mmap.html
 - OpenCV packaging (choose one cv2 provider): https://pypi.org/project/opencv-python-headless/
 - Future RKNN Toolkit2 scope: https://github.com/airockchip/rknn-toolkit2
+
+
+## Shared real-camera test videos
+
+[Shared video catalog](data/shared_vision/README.md) provides four user-supplied
+real drone-camera MP4 fixtures, hashes, reported capture settings, decoding checks
+and replay instructions. `data/shared_vision/` is a relative link to the shared
+RM27 dataset, with one physical copy; videos are local data, not included in a
+standalone clone. Keep derived test outputs separate from these inputs. See the
+catalog for exposure-mapping and synchronized-IMU/timestamp limitations.
+
+## Shared M3C and MaixCAM2 board references
+
+[Shared board catalog](data/shared_m3c_board/README.md) provides the user-supplied
+M3C/MaixCAM2 schematics and 3D/mechanical files, with a SHA-256 manifest.
+Use `data/shared_m3c_board/raw/` from this checkout; all local aliases share one
+physical collection. Match the document to the actual board revision. Raw files
+are local references supplied separately from Git clones; see the catalog for paths.
+
+## Shared RM27 aircraft model
+
+The current shared simulation aircraft is **ASM2 v1.0.0 (142 g)**.
+For new MuJoCo work, use the **v0.1.0 collision proxy** from the
+[shared aircraft catalog](data/shared_aircraft/README.md).
+Existing experiments retain their pinned model and configuration.

@@ -37,6 +37,12 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(int(output[0, 0]), 76)  # known BGR red to gray
         output[:] = 0
         self.assertEqual(frames[1].image[0, 0].tolist(), [0, 0, 255])
+        owned = preprocess(frames[1].image, ProcessingConfig())
+        borrowed = preprocess(frames[1].image, ProcessingConfig(), borrow_input=True)
+        np.testing.assert_array_equal(owned, borrowed)
+        self.assertFalse(np.shares_memory(owned, frames[1].image))
+        self.assertTrue(np.shares_memory(borrowed, frames[1].image))
+        self.assertFalse(borrowed.flags.writeable)
         with self.assertRaises(RuntimeError):
             list(source)
 

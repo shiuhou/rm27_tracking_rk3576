@@ -63,7 +63,7 @@ class ProcessingConfig:
             raise ValueError("grayscale must be boolean")
 
 
-def preprocess(image: np.ndarray, config: ProcessingConfig) -> np.ndarray:
+def preprocess(image: np.ndarray, config: ProcessingConfig, *, borrow_input: bool = False) -> np.ndarray:
     if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3 or not image.size:
         raise ValueError("expected nonempty uint8 BGR image")
     result = image
@@ -71,8 +71,13 @@ def preprocess(image: np.ndarray, config: ProcessingConfig) -> np.ndarray:
         result = cv2.resize(result, (config.width, config.height), interpolation=cv2.INTER_AREA)
     if config.grayscale:
         result = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
-    # OpenCV transformations already own their output; copy only the identity path.
-    return result.copy() if result is image else result
+    if result is not image:
+        return result
+    if not borrow_input:
+        return image.copy()
+    view = image.view()
+    view.setflags(write=False)
+    return view
 
 
 class ReplaySource:

@@ -120,12 +120,16 @@ class Control(C.Structure):
 
 
 def query_exposure_controls(fd):
-    """Read standard controls once per open. Values are NOT frame synchronized."""
+    """Read standard exposure controls once per open, outside the frame timeline."""
+    return _query_controls(fd, (("exposure_auto", 0x009a0901, "V4L2 exposure mode enum"),
+                                ("exposure_absolute", 0x009a0902, "100 microseconds"),
+                                ("exposure_auto_priority", 0x009a0903, "boolean"),
+                                ("exposure", 0x00980911, "driver-defined; physical units unverified")))
+
+
+def _query_controls(fd, specifications):
     controls = []
-    for name, identity, units in (("exposure_auto", 0x009a0901, "V4L2 exposure mode enum"),
-                                  ("exposure_absolute", 0x009a0902, "100 microseconds"),
-                                  ("exposure_auto_priority", 0x009a0903, "boolean"),
-                                  ("exposure", 0x00980911, "driver-defined; physical units unverified")):
+    for name, identity, units in specifications:
         item = {"name": name, "id": identity, "units": units, "available": False,
                 "read_start_monotonic_ns": monotonic_ns(),
                 "provenance": "VIDIOC_QUERYCTRL/VIDIOC_G_CTRL readback; not frame synchronized"}
@@ -177,10 +181,15 @@ class CameraConfig:
     restart_attempts: int = 0
     restart_delay_s: float = 0.25
     capture_type: str = "auto"
+    required_driver: str | None = None
+    strict_mode: bool = False
 
     def __post_init__(self):
-        if not isinstance(self.device, str) or not self.device.startswith("/dev/video"):
-            raise ValueError("device must be an explicit /dev/video path")
+        if not isinstance(self.device, str) or not self.device.startswith(("/dev/video", "/dev/v4l/by-id/")):
+            raise ValueError("device must be an explicit video node or /dev/v4l/by-id path")
+        if type(self.strict_mode) is not bool or (self.required_driver is not None and
+                                                  not isinstance(self.required_driver, str)):
+            raise ValueError("invalid strict_mode or required_driver")
         if self.backend != "v4l2":
             raise ValueError("only direct v4l2 is implemented")
         if self.capture_type not in {"auto", "single", "mplane"}:
@@ -249,6 +258,9 @@ class V4L2Capture:
         try:
             self.fd = os.open(self.config.device, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC)
             cap = _ioctl(self.fd, 0, Capability(), 2)
+            driver = bytes(cap.driver).decode(errors="replace")
+            if self.config.required_driver is not None and driver != self.config.required_driver:
+                raise ValueError(f"camera driver {driver!r} differs from {self.config.required_driver!r}")
             caps = cap.device_caps if cap.capabilities & 0x80000000 else cap.capabilities
             if not caps & 0x04000000:
                 raise ValueError("camera requires STREAMING capability")
@@ -296,7 +308,17 @@ class V4L2Capture:
                         raise
             interval = parm.parm.capture.timeperframe
             self.reported["fps"] = interval.denominator / interval.numerator if interval.numerator else None
+            if self.config.strict_mode:
+                for name in ("width", "height", "fourcc", "fps"):
+                    requested_value = getattr(self.config, name)
+                    if requested_value is not None and self.reported[name] != requested_value:
+                        raise ValueError(f"camera negotiated {name}={self.reported[name]!r}; requested {requested_value!r}")
             self.reported['exposure_controls'] = query_exposure_controls(self.fd)
+            if driver == "uvcvideo":
+                self.reported["white_balance_controls"] = _query_controls(self.fd, (
+                    ("white_balance_automatic", 0x0098090c, "boolean"),
+                    ("white_balance_temperature", 0x0098091a, "kelvin; driver control"),
+                ))
             request = _ioctl(self.fd, 8, RequestBuffers(count=self.config.buffer_count, type=self.buffer_type, memory=1))
             if not 2 <= request.count <= self.config.buffer_count:
                 raise ValueError("driver buffer count is outside requested bounded allocation")
